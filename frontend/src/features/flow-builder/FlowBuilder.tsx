@@ -105,7 +105,7 @@ type SimStep = {
   meta?: string;
 };
 
-export function FlowBuilder() {
+export function FlowBuilder({ autoSim = false }: { autoSim?: boolean } = {}) {
   const [state, setState] = useState<FlowState>(DEFAULT_STATE);
   const [selected, setSelected] = useState<string>("n2");
   const [showSim, setShowSim] = useState(false);
@@ -239,6 +239,15 @@ export function FlowBuilder() {
       }, 350 * (i + 1));
     });
   };
+
+  // Vindo de /simulacao (?sim=1): abre o testador e roda uma simulação rápida no mount.
+  useEffect(() => {
+    if (autoSim) {
+      setShowSim(true);
+      runSim();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSim]);
 
   return (
     <div className="flex h-[calc(100vh-74px)]">

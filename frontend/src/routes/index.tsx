@@ -3,6 +3,9 @@ import { AppLayout } from "@/components/AppLayout";
 import { FlowBuilder } from "@/features/flow-builder/FlowBuilder";
 
 export const Route = createFileRoute("/")({
+  validateSearch: (search: Record<string, unknown>): { sim?: 1 } => ({
+    sim: search.sim === 1 || search.sim === "1" ? 1 : undefined,
+  }),
   head: () => ({
     meta: [
       { title: "Flow Builder · SDR TOTUM NEXT" },
@@ -13,9 +16,10 @@ export const Route = createFileRoute("/")({
 });
 
 function Page() {
+  const { sim } = Route.useSearch();
   return (
     <AppLayout>
-      <FlowBuilder />
+      <FlowBuilder autoSim={sim === 1} />
     </AppLayout>
   );
 }
