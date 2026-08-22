@@ -1,0 +1,224 @@
+/**
+ * flow_runner.js — executa o graph de um flow por conversation.
+ *
+ * Node types suportados:
+ *   - message              envia texto fixo (com template {{var}})
+ *   - question             envia pergunta e aguarda próxima inbound
+ *   - condition            avalia expressão simples em context, escolhe branch
+ *   - improvise_with_goal  LLM autorizado a responder livre até bater criteria
+ *   - call_manus           delega pra Manus e continua com output no context
+ *   - end                  encerra o flow (marca conversation.status = 'closed')
+ *
+ * Contrato:
+ *   const runner = createRunner({ llmGenerate, manusClient, sender, logger });
+ *   const result = await runner.step({ flow, conversation, inboundText });
+ *   // → { outboundMessages: [...], nextStepId, done, updates: {...} }
+ *
+ * O runner é PURO em relação a I/O de banco: quem persiste `updates` é o
+ * server.js. Isso facilita testar sem Supabase.
+ */
+
+function renderTemplate(text, vars = {}) {
+  return String(text || '').replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (m, k) => {
+    const parts = k.split('.');
+    let v = vars;
+    for (const p of parts) {
+      if (v == null) return m;
+      v = v[p];
+    }
+    return v === undefined || v === null || v === '' ? m : String(v);
+  });
+}
+
+function findNode(flow, stepId) {
+  const nodes = (flow.graph && flow.graph.nodes) || [];
+  return nodes.find((n) => n.id === stepId) || null;
+}
+
+function findEdgeTarget(flow, fromId, branch = null) {
+  const edges = (flow.graph && flow.graph.edges) || [];
+  const match = edges.find(
+    (e) => e.source === fromId && (branch == null || e.branch === branch)
+  );
+  return match ? match.target : null;
+}
+
+function evalCondition(expr, context) {
+  // Micro-DSL: `context.foo == "bar"` | `context.x > 3` | `context.y != null`
+  // Não usa eval(); parse manual muito simples.
+  const m = String(expr || '').match(/^\s*context\.([\w.-]+)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$/);
+  if (!m) return false;
+  const [, path, op, rhsRaw] = m;
+  const lhs = path.split('.').reduce((acc, k) => (acc == null ? acc : acc[k]), context);
+  let rhs = rhsRaw.trim();
+  if (rhs === 'null') rhs = null;
+  else if (rhs === 'true') rhs = true;
+  else if (rhs === 'false') rhs = false;
+  else if (/^-?\d+(\.\d+)?$/.test(rhs)) rhs = Number(rhs);
+  else if (/^"(.*)"$/.test(rhs) || /^'(.*)'$/.test(rhs)) rhs = rhs.slice(1, -1);
+  switch (op) {
+    case '==': return lhs == rhs; // eslint-disable-line eqeqeq
+    case '!=': return lhs != rhs; // eslint-disable-line eqeqeq
+    case '>':  return lhs > rhs;
+    case '<':  return lhs < rhs;
+    case '>=': return lhs >= rhs;
+    case '<=': return lhs <= rhs;
+    default:   return false;
+  }
+}
+
+/**
+ * Fábrica: injeta dependências para permitir testes com mocks.
+ */
+function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
+  async function stepMessage(node, ctx) {
+    const text = renderTemplate(node.text || '', ctx);
+    return {
+      outboundMessages: [{ text, type: 'text' }],
+      nextStepId: findEdgeTarget({ graph: ctx.__flow.graph }, node.id),
+      done: false,
+      updates: {},
+    };
+  }
+
+  async function stepQuestion(node, ctx, inboundText) {
+    // Se ainda não veio inbound, envia a pergunta e aguarda
+    if (!inboundText) {
+      const text = renderTemplate(node.text || '', ctx);
+      return {
+        outboundMessages: [{ text, type: 'text' }],
+        nextStepId: node.id, // permanece no mesmo nó aguardando resposta
+        done: false,
+        updates: { awaiting_inbound: true },
+      };
+    }
+    // Chegou inbound: grava em context[var_name] e avança
+    const updates = {};
+    if (node.save_as) updates[node.save_as] = inboundText;
+    return {
+      outboundMessages: [],
+      nextStepId: findEdgeTarget({ graph: ctx.__flow.graph }, node.id),
+      done: false,
+      updates,
+    };
+  }
+
+  async function stepCondition(node, ctx) {
+    const branch = evalCondition(node.expr, ctx) ? 'true' : 'false';
+    return {
+      outboundMessages: [],
+      nextStepId: findEdgeTarget({ graph: ctx.__flow.graph }, node.id, branch),
+      done: false,
+      updates: {},
+    };
+  }
+
+  async function stepImprovise(node, ctx, inboundText) {
+    const turnsSoFar = ctx.__improvise_turns || 0;
+    const maxTurns = Number(node.max_turns || 3);
+    if (turnsSoFar >= maxTurns) {
+      logger.warn(`[flow] improvise_with_goal ${node.id} estourou max_turns=${maxTurns}, indo fallback`);
+      return {
+        outboundMessages: [],
+        nextStepId: node.fallback_step_id || null,
+        done: false,
+        updates: { __improvise_turns: 0 },
+      };
+    }
+    const prompt = [
+      `Você é um SDR consultivo Totum no WhatsApp (BR, curto, humano).`,
+      `OBJETIVO deste passo: ${node.goal}`,
+      `CRITÉRIOS DE SUCESSO (todos devem ser atendidos):`,
+      ...(node.success_criteria || []).map((c) => `- ${c}`),
+      ``,
+      `Histórico da conversa:`,
+      ...(ctx.__history || []).map((h) => `[${h.direction}] ${h.content}`),
+      inboundText ? `\nÚltima mensagem do lead: ${inboundText}` : '',
+      ``,
+      `Responda um JSON válido: {"reply": "mensagem curta", "goal_reached": true|false}`,
+    ].join('\n');
+    if (!llmGenerate) throw new Error('flow_runner: llmGenerate não injetado');
+    const raw = await llmGenerate(prompt);
+    let parsed;
+    try {
+      const clean = String(raw).replace(/```json\n?/gi, '').replace(/```/g, '').trim();
+      const s = clean.indexOf('{');
+      const e = clean.lastIndexOf('}');
+      parsed = JSON.parse(s >= 0 && e > s ? clean.slice(s, e + 1) : clean);
+    } catch {
+      parsed = { reply: 'Deixa eu te responder já já 😊', goal_reached: false };
+    }
+    const reply = String(parsed.reply || '').trim() || '...';
+    const reached = Boolean(parsed.goal_reached);
+    if (reached) {
+      return {
+        outboundMessages: [{ text: reply, type: 'text' }],
+        nextStepId: node.on_success_step_id || findEdgeTarget({ graph: ctx.__flow.graph }, node.id, 'success'),
+        done: false,
+        updates: { __improvise_turns: 0 },
+      };
+    }
+    return {
+      outboundMessages: [{ text: reply, type: 'text' }],
+      nextStepId: node.id, // permanece esperando próxima inbound
+      done: false,
+      updates: { __improvise_turns: turnsSoFar + 1, awaiting_inbound: true },
+    };
+  }
+
+  async function stepCallManus(node, ctx) {
+    if (!manusClient || !manusClient.callManus) {
+      throw new Error('flow_runner: manusClient não injetado');
+    }
+    const objective = renderTemplate(node.objective || '', ctx);
+    const result = await manusClient.callManus({
+      objective,
+      context: ctx,
+      timeout_ms: Number(node.timeout_ms || 60000),
+    });
+    const updates = {};
+    if (node.save_as) updates[node.save_as] = result;
+    return {
+      outboundMessages: [],
+      nextStepId: findEdgeTarget({ graph: ctx.__flow.graph }, node.id),
+      done: false,
+      updates,
+    };
+  }
+
+  async function stepEnd() {
+    return {
+      outboundMessages: [],
+      nextStepId: null,
+      done: true,
+      updates: { status: 'closed' },
+    };
+  }
+
+  async function step({ flow, conversation, inboundText = null }) {
+    const stepId = conversation.current_step_id || (flow.graph.entry_step_id || (flow.graph.nodes[0] && flow.graph.nodes[0].id));
+    const node = findNode(flow, stepId);
+    if (!node) throw new Error(`flow_runner: node não encontrado "${stepId}"`);
+
+    const ctx = {
+      ...(conversation.context || {}),
+      __flow: flow,
+      __history: conversation.__history || [],
+    };
+
+    switch (node.type) {
+      case 'message':             return stepMessage(node, ctx);
+      case 'question':            return stepQuestion(node, ctx, inboundText);
+      case 'condition':           return stepCondition(node, ctx);
+      case 'improvise_with_goal': return stepImprovise(node, ctx, inboundText);
+      case 'call_manus':          return stepCallManus(node, ctx);
+      case 'end':                 return stepEnd();
+      default:
+        throw new Error(`flow_runner: node.type desconhecido "${node.type}"`);
+    }
+  }
+
+  return { step, renderTemplate, evalCondition };
+}
+
+module.exports = { createRunner, renderTemplate, evalCondition, findNode, findEdgeTarget };
