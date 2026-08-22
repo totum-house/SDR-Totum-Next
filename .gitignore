@@ -1,0 +1,45 @@
+# Env / secrets — NUNCA commitar
+.env
+.env.local
+.env.production
+.env.*.local
+*.pem
+*.key
+*.crt
+
+# Dependências
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Runtime / dados
+data/
+sessions/
+*.sqlite
+*.db
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json.example
+Thumbs.db
+
+# Coverage / testes
+coverage/
+.nyc_output/
+
+# Cache
+.cache/
+.turbo/
