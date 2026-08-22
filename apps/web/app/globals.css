@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand: 220 38 38; /* red-600 */
+  --bg: 24 24 27;      /* zinc-900 */
+  --fg: 244 244 245;   /* zinc-100 */
+  --panel: 39 39 42;   /* zinc-800 */
+  --muted: 161 161 170; /* zinc-400 */
+  --border: 63 63 70;  /* zinc-700 */
+}
+
+html, body {
+  height: 100%;
+  background: rgb(var(--bg));
+  color: rgb(var(--fg));
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  border-color: rgb(var(--border));
+}
+
+.btn-primary {
+  @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium bg-brand-600 hover:bg-brand-700 text-white transition-colors;
+}
+
+.btn-ghost {
+  @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium hover:bg-zinc-800 text-zinc-300 transition-colors;
+}
+
+.card {
+  @apply bg-zinc-800/60 border border-zinc-700 rounded-lg p-4;
+}
