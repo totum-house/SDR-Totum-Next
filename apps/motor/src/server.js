@@ -16,9 +16,16 @@
 
 const express = require('express');
 
+const { getSupabaseClient } = require('./supabase_client');
+const openwa = require('./openwa_client');
+const { handleInboundEvent } = require('./webhook_handler');
+
 const PORT = Number(process.env.MOTOR_PORT || 3100);
 const BIND = process.env.MOTOR_BIND || '127.0.0.1';
 const WEBHOOK_TOKEN = process.env.OPENWA_WEBHOOK_TOKEN || '';
+// MVP single-tenant: 1 workspace por deploy do motor. Multi-workspace por
+// número OpenWA fica para fase futura (precisaria mapear DID → workspace).
+const WORKSPACE_ID = process.env.MOTOR_DEFAULT_WORKSPACE_ID || '';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -27,15 +34,33 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', pid: process.pid, uptime_s: Math.round(process.uptime()) });
 });
 
-app.post('/api/webhook/openwa', (req, res) => {
+app.post('/api/webhook/openwa', async (req, res) => {
   const auth = req.get('Authorization') || '';
   if (!WEBHOOK_TOKEN || auth !== `Bearer ${WEBHOOK_TOKEN}`) {
     return res.status(401).json({ error: 'unauthorized' });
   }
-  // TODO fase 4+: enfileirar evento pro processor (brain.js + flow_runner)
-  // Por enquanto só aceita e loga; processor é integrado depois via fila.
-  console.log('[webhook] openwa event:', JSON.stringify(req.body).slice(0, 300));
-  res.json({ ok: true });
+
+  const supabase = getSupabaseClient();
+  if (!supabase || !WORKSPACE_ID) {
+    console.log(
+      '[webhook] supabase/MOTOR_DEFAULT_WORKSPACE_ID não configurado — stub mode, evento só logado:',
+      JSON.stringify(req.body).slice(0, 300)
+    );
+    return res.json({ ok: true, stubbed: true });
+  }
+
+  try {
+    const result = await handleInboundEvent({
+      body: req.body,
+      workspaceId: WORKSPACE_ID,
+      supabase,
+      openwa,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[webhook] erro processando evento:', err.message);
+    res.status(500).json({ error: 'internal', message: err.message });
+  }
 });
 
 if (require.main === module) {
