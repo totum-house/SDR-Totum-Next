@@ -3,8 +3,8 @@
  * Rodar: pnpm --filter @sdr-next/motor test
  */
 
-const { describe, it, expect, vi } = require('vitest');
-const { createRunner, renderTemplate, evalCondition, findEdgeTarget } = require('../src/flow_runner');
+import { describe, it, expect, vi } from 'vitest';
+import { createRunner, renderTemplate, evalCondition, findEdgeTarget } from '../src/flow_runner.js';
 
 const baseFlow = {
   id: 'flow-1',
