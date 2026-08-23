@@ -54,13 +54,15 @@
                     │  supa.grupototum.com           │
                     │  Schema: totum_sdr             │
                     │                                │
-                    │  Tabelas principais:           │
+                    │  Tabelas (001_bootstrap):       │
+                    │  ├─ workspaces                 │
                     │  ├─ leads                      │
                     │  ├─ conversations              │
                     │  ├─ messages                   │
                     │  ├─ flows                      │
-                    │  ├─ campaigns                  │
-                    │  └─ warmup_state               │
+                    │  ├─ flow_runs                  │
+                    │  ├─ automations                │
+                    │  └─ automation_runs             │
                     └────────────────────────────────┘
 ```
 
