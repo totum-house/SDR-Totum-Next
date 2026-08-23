@@ -14,8 +14,8 @@ Migrations versionadas para o Supabase self-hosted (`supa.grupototum.com`).
 
 | # | Arquivo                              | Status  | Descrição                           |
 |---|--------------------------------------|---------|-------------------------------------|
-| 001 | `001_bootstrap_totum_sdr.sql`      | pending | Schema + 8 tabelas + RLS enable     |
-| 002 | `002_totum_sdr_rls_policies.sql`   | TBD     | Policies RLS após Auth conectada    |
+| 001 | `001_bootstrap_totum_sdr.sql`      | pending | Schema + 8 tabelas (RLS ainda desabilitada) |
+| 002 | `002_totum_sdr_rls_policies.sql`   | TBD     | Enable RLS + policies, juntos, após Auth conectada |
 
 ## Procedimento de apply (produção)
 

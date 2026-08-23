@@ -19,9 +19,13 @@
 --   5) Validar:
 --        \dt totum_sdr.*   -- deve listar 7 tabelas
 --
--- RLS: policies NÃO estão nessa migration. Serão adicionadas em
--- 002_totum_sdr_rls_policies.sql após Auth conectada e definição
--- explícita de tenants aprovada pelo Rael. Aqui só habilitamos RLS.
+-- RLS: NÃO habilitada nesta migration (nem enable, nem policies).
+-- Habilitar RLS sem policy nenhuma bloqueia acesso de roles não-owner
+-- (anon/authenticated) às tabelas — não há como aplicar isso com
+-- segurança sem policy no mesmo commit, e RLS/policies é camada L8
+-- (🔴 vermelho — nunca sozinho, ver docs/PROTOCOL_CAMADAS.md) até
+-- Auth estar conectada e os tenants definidos com aprovação do Rael.
+-- Enable + CREATE POLICY virão juntos em 002_totum_sdr_rls_policies.sql.
 -- =============================================================
 
 BEGIN;
@@ -164,17 +168,6 @@ CREATE TABLE totum_sdr.automation_runs (
 CREATE INDEX idx_automation_runs_automation ON totum_sdr.automation_runs (automation_id, created_at DESC);
 
 -- --------------------------------------------------------------
--- RLS: habilitar (sem policies ainda — vem na 002)
--- --------------------------------------------------------------
-ALTER TABLE totum_sdr.leads            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.conversations    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.messages         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.flows            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.flow_runs        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.automations      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.automation_runs  ENABLE ROW LEVEL SECURITY;
-
--- --------------------------------------------------------------
 -- Trigger genérico updated_at
 -- --------------------------------------------------------------
 CREATE OR REPLACE FUNCTION totum_sdr.set_updated_at()
@@ -199,11 +192,10 @@ COMMIT;
 -- Verificação pós-apply (rodar manualmente):
 --   SELECT table_name FROM information_schema.tables
 --     WHERE table_schema = 'totum_sdr' ORDER BY table_name;
---   -- esperado: 7 linhas (automation_runs, automations, conversations,
+--   -- esperado: 8 linhas (automation_runs, automations, conversations,
 --   --                     flow_runs, flows, leads, messages, workspaces)
---   -- (nota: 8 tabelas incluindo workspaces; SPEC original menciona 7 "operacionais")
 --
---   SELECT tablename, rowsecurity FROM pg_tables
---     WHERE schemaname = 'totum_sdr' AND rowsecurity = true;
---   -- esperado: 7 tabelas com RLS habilitada (workspaces fica sem RLS por ser tenant root)
+--   RLS ainda NÃO habilitada em nenhuma tabela desta migration — só
+--   acesso via service_role até 002_totum_sdr_rls_policies.sql
+--   (enable + policy no mesmo commit, aprovado pelo Rael).
 -- =============================================================
