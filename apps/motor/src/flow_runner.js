@@ -24,6 +24,41 @@
 // forjar tags de sistema e tentar prompt injection.
 const MAX_INBOUND_LEN = 2000;
 
+// Teto da resposta gerada pelo LLM antes de virar mensagem de WhatsApp.
+// Mensagem de SDR é curta por design; um LLM que "derrapa" e devolve um
+// muro de texto queima o número no warm-up e denuncia o bot.
+const MAX_REPLY_LEN = 900;
+
+const REPLY_FALLBACK = 'Deixa eu te responder j\u00e1 j\u00e1 \ud83d\ude0a';
+
+/**
+ * Guardrail do output do LLM antes de ir pro lead.
+ *
+ * - descarta cercas de c\u00f3digo e marca\u00e7\u00e3o tipo tag que vazam do modelo
+ * - remove controles e colapsa espa\u00e7o em excesso
+ * - corta em MAX_REPLY_LEN na \u00faltima fronteira de frase/palavra, pra n\u00e3o
+ *   mandar mensagem cortada no meio da palavra
+ * - devolve o fallback se sobrar vazio
+ */
+function sanitizeLlmReply(text) {
+  let s = String(text == null ? '' : text);
+  s = s.replace(/```[\s\S]*?```/g, ' ');
+  s = s.replace(/```/g, ' ');
+  s = s.replace(/<[^>]{0,80}>/g, ' ');
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+  s = s.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+
+  if (s.length > MAX_REPLY_LEN) {
+    const head = s.slice(0, MAX_REPLY_LEN);
+    const lastSentence = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '));
+    const cut = lastSentence > MAX_REPLY_LEN * 0.5 ? lastSentence + 1 : head.lastIndexOf(' ');
+    s = (cut > 0 ? head.slice(0, cut) : head).trim();
+  }
+
+  return s || REPLY_FALLBACK;
+}
+
 /**
  * Sanitiza texto vindo do lead antes de gravar em context.
  *
@@ -176,9 +211,9 @@ function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
       const e = clean.lastIndexOf('}');
       parsed = JSON.parse(s >= 0 && e > s ? clean.slice(s, e + 1) : clean);
     } catch {
-      parsed = { reply: 'Deixa eu te responder já já 😊', goal_reached: false };
+      parsed = { reply: REPLY_FALLBACK, goal_reached: false };
     }
-    const reply = String(parsed.reply || '').trim() || '...';
+    const reply = sanitizeLlmReply(parsed.reply);
     const reached = Boolean(parsed.goal_reached);
     if (reached) {
       return {
@@ -258,4 +293,5 @@ module.exports = {
   findNode,
   findEdgeTarget,
   sanitizeInbound,
+  sanitizeLlmReply,
 };
