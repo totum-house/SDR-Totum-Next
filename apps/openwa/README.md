@@ -121,11 +121,40 @@ curl -X POST http://127.0.0.1:2785/api/sessions/{sessionId}/webhooks/{webhookId}
 # esperado: {"success":true,"statusCode":200}
 ```
 
+## Acesso externo: zap.grupototum.com (ativado em 2026-08-24)
+
+DNS (A record → 2.24.206.161) atrás de Cloudflare (proxy laranja), roteado
+por Traefik/Coolify até o container, protegido por Basic Auth. Config em
+`/data/coolify/proxy/dynamic/zap-openwa.yaml` no VPS (fora deste repo —
+é infra do Coolify, não do monorepo).
+
+**Duas descobertas que valem registro pra quem mexer nisso de novo:**
+
+1. `host.docker.internal` resolve ERRADO dentro do `coolify-proxy` nessa
+   VPS (aponta pra `10.0.0.1`; a rede real do proxy, `coolify`, tem
+   gateway `10.0.1.1`). Os configs existentes `totum-system.yaml` e
+   `totum-os.yaml` usam `host.docker.internal` e por isso **muito
+   provavelmente estão quebrados** (confirmado erro de ACME nos logs do
+   Traefik pra `totum.pixelsystem.online`) — não é problema deste
+   projeto, não mexemos neles, só documentando o padrão pra não repetir.
+
+2. A correção que funcionou: `docker network connect coolify openwa-api`
+   — conecta o container numa segunda rede Docker (a do Coolify), sem
+   tocar no bind original (`127.0.0.1:2785` continua intacto, não fica
+   mais exposto no host por causa disso). O serviço no Traefik aponta
+   pro nome do container (`http://openwa-api:2785`), resolvido pela DNS
+   interna do Docker nessa rede compartilhada. Persistido em
+   `docker-compose.dev.yml` (bloco `networks:` do serviço `openwa` +
+   `coolify: {external: true}` no topo), pra sobreviver a um recreate.
+
+Credenciais do Basic Auth: com o Rael, fora deste repo (nunca commitar).
+
 ## Regras críticas
 
-- **Bind exclusivo em `127.0.0.1:2785`** — nunca `0.0.0.0`
-- **Exposição externa (se um dia precisar)**: só via Traefik com Basic
-  Auth ou IP allowlist. Hoje o acesso é por túnel SSH
+- **Bind exclusivo em `127.0.0.1:2785`** — nunca `0.0.0.0`. A exposição
+  pública em zap.grupototum.com passa por Traefik + Basic Auth, não por
+  reconfigurar esse bind.
+- **Acesso alternativo (sem depender do domínio)**: túnel SSH
   (`ssh -L 2785:127.0.0.1:2785 usuario@panel.grupototum.com`, rodado no
   seu computador, não no VPS).
 - **QR code só é escaneado por decisão explícita do Rael** — nunca automático
