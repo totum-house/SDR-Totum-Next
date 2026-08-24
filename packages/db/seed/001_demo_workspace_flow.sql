@@ -10,19 +10,30 @@
 -- no Supabase Auth. É esse email que as policies RLS da 001 casam com o
 -- claim do JWT — se estiver errado, o console não enxerga nada.
 --
--- Rodar:
---   psql -h supa.grupototum.com -U postgres -d postgres \
---     -f packages/db/seed/001_demo_workspace_flow.sql
+-- Rodar (procedimento completo, incluindo container do VPS, em
+-- packages/db/README.md):
+--   docker exec -i <CONTAINER> psql -U postgres -d postgres \
+--     < packages/db/seed/001_demo_workspace_flow.sql
 --
 -- Depois, pegue o UUID impresso no final e ponha no .env do VPS como
 -- MOTOR_DEFAULT_WORKSPACE_ID.
+--
+-- IDEMPOTÊNCIA: totum_sdr.workspaces NÃO tem UNIQUE em `name` nem
+-- `owner_email` (só PK em `id`, sempre um UUID novo) — por isso o
+-- INSERT abaixo usa WHERE NOT EXISTS em vez de ON CONFLICT DO NOTHING.
+-- ON CONFLICT precisa de uma constraint pra saber o que é "conflito";
+-- sem uma, ele não impede nada e cada execução cria uma workspace nova
+-- (bug real, encontrado em produção em 2026-08-24 — o seed rodou 2x e
+-- criou 2 workspaces "Totum SDR" antes desta correção).
 -- =============================================================
 
 BEGIN;
 
 INSERT INTO totum_sdr.workspaces (name, owner_email)
-VALUES ('Totum SDR', 'TROQUE_AQUI@grupototum.com')
-ON CONFLICT DO NOTHING;
+SELECT 'Totum SDR', 'TROQUE_AQUI@grupototum.com'
+WHERE NOT EXISTS (
+  SELECT 1 FROM totum_sdr.workspaces WHERE name = 'Totum SDR'
+);
 
 INSERT INTO totum_sdr.flows (workspace_id, name, version, is_active, graph)
 SELECT
