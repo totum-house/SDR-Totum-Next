@@ -32,25 +32,54 @@ Migrations versionadas para o Supabase self-hosted (`supa.grupototum.com`).
 
 ## Procedimento de apply (produção)
 
+> **O Postgres NÃO é acessível de fora.** `supa.grupototum.com` resolve para
+> o VPS (2.24.206.161), mas a porta 5432 está fechada/filtrada — de propósito.
+> Todo comando de banco roda **por SSH, dentro do container Docker**.
+> Comandos do tipo `pg_dump -h supa.grupototum.com` falham por timeout.
+
 ```bash
-# 1. Backup
-pg_dump -h supa.grupototum.com -U postgres -d postgres --schema-only \
-  -f /tmp/supa-backup-$(date +%Y%m%d-%H%M%S).sql
-sha256sum /tmp/supa-backup-*.sql | tee /tmp/supa-backup.sha256
+# 0. Descobrir o container do Postgres (o nome varia por instalação)
+ssh claude_sftp@panel.grupototum.com \
+  "docker ps --format '{{.Names}}\t{{.Image}}' | grep -iE 'db|postgres|supabase'"
 
-# 2. Confirmar que o schema não existe
-psql -h supa.grupototum.com -U postgres -d postgres -c "\dn totum_sdr"
+# 1. Backup schema-only — SEM -t no docker exec, senão o dump vem com \r
+ssh claude_sftp@panel.grupototum.com \
+  "docker exec <CONTAINER> pg_dump -U postgres -d postgres --schema-only" \
+  > /tmp/supa-backup-$(date +%Y%m%d-%H%M%S).sql
 
-# 3. Aguardar OK do Rael
+# 2. CONFERIR que o backup não está vazio (backup vazio = falsa segurança)
+ls -lh /tmp/supa-backup-*.sql
+shasum -a 256 /tmp/supa-backup-*.sql | tee /tmp/supa-backup.sha256
 
-# 4. Aplicar
-psql -h supa.grupototum.com -U postgres -d postgres \
-  -f packages/db/migrations/001_bootstrap_totum_sdr.sql
+# 3. Confirmar que o schema ainda não existe
+ssh claude_sftp@panel.grupototum.com \
+  "docker exec <CONTAINER> psql -U postgres -d postgres -c '\\dn totum_sdr'"
 
-# 5. Verificar
-psql -h supa.grupototum.com -U postgres -d postgres \
-  -c "SELECT table_name FROM information_schema.tables WHERE table_schema='totum_sdr' ORDER BY table_name;"
+# 4. Aguardar "aprovado, aplica em prod" literal do Rael
+
+# 5. Aplicar, empurrando o arquivo local por stdin (não precisa clonar no VPS)
+ssh claude_sftp@panel.grupototum.com \
+  "docker exec -i <CONTAINER> psql -U postgres -d postgres" \
+  < packages/db/migrations/001_bootstrap_totum_sdr.sql
+
+# 6. Verificar
+ssh claude_sftp@panel.grupototum.com \
+  "docker exec <CONTAINER> psql -U postgres -d postgres -c \
+   \"SELECT table_name FROM information_schema.tables WHERE table_schema='totum_sdr' ORDER BY table_name;\""
 ```
+
+## Seed (depois da migration)
+
+```bash
+# EDITE o owner_email no arquivo antes — é o email que as policies RLS
+# casam com o claim do JWT. Errado = console não enxerga nada.
+ssh claude_sftp@panel.grupototum.com \
+  "docker exec -i <CONTAINER> psql -U postgres -d postgres" \
+  < packages/db/seed/001_demo_workspace_flow.sql
+```
+
+O seed imprime o UUID do workspace no final — vai em `MOTOR_DEFAULT_WORKSPACE_ID`
+no `.env` do VPS.
 
 ## Rollback
 

@@ -6,18 +6,23 @@
 -- =============================================================
 --
 -- IMPORTANTE — antes de aplicar em produção:
---   1) Backup schema-only obrigatório:
---        pg_dump -h supa.grupototum.com -U postgres -d postgres --schema-only \
---          -f /tmp/supa-backup-$(date +%Y%m%d-%H%M%S).sql
---        sha256sum /tmp/supa-backup-*.sql > /tmp/supa-backup.sha256
---   2) Verificar que schema `totum_sdr` NÃO existe ainda:
---        \dn totum_sdr
---   3) Aguardar autorização literal "aprovado, aplica em prod" do Rael.
---   4) Aplicar em bloco único:
---        psql -h supa.grupototum.com -U postgres -d postgres \
---          -f packages/db/migrations/001_bootstrap_totum_sdr.sql
---   5) Validar:
---        \dt totum_sdr.*   -- deve listar 7 tabelas
+--
+--   O Postgres NÃO aceita conexão de fora: supa.grupototum.com aponta pro
+--   VPS mas a 5432 está fechada. Tudo roda por SSH dentro do container
+--   Docker. Procedimento completo em packages/db/README.md.
+--
+--   1) Backup schema-only obrigatório (sem -t: -t corrompe o dump com \r):
+--        ssh claude_sftp@panel.grupototum.com \
+--          "docker exec <CONTAINER> pg_dump -U postgres -d postgres --schema-only" \
+--          > /tmp/supa-backup-$(date +%Y%m%d-%H%M%S).sql
+--   2) CONFERIR que o backup não saiu vazio antes de seguir.
+--   3) Verificar que o schema `totum_sdr` NÃO existe ainda (\dn totum_sdr).
+--   4) Aguardar autorização literal "aprovado, aplica em prod" do Rael.
+--   5) Aplicar empurrando por stdin:
+--        ssh claude_sftp@panel.grupototum.com \
+--          "docker exec -i <CONTAINER> psql -U postgres -d postgres" \
+--          < packages/db/migrations/001_bootstrap_totum_sdr.sql
+--   6) Validar: \dt totum_sdr.*   -- deve listar 8 tabelas
 --
 -- RLS: habilitada NESTA migration, junto com as policies (enable sem
 -- policy trancaria as tabelas para anon/authenticated). Modelo mínimo:
