@@ -20,6 +20,9 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const DEFAULT_CHAIN = ['gemini', 'groq', 'nvidia'];
 const DEFAULT_TIMEOUT = 8000;
+// 1 tentativa + 2 retries por provider antes de cair pro próximo da chain
+const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_RETRY_BASE_MS = 250;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -84,7 +87,10 @@ async function genOpenAICompatible(prompt, c) {
     });
     if (!res.ok) {
       const t = await res.text().catch(() => '');
-      throw new Error(`${c.name} ${res.status} ${t.slice(0, 140)}`);
+      const err = new Error(`${c.name} ${res.status} ${t.slice(0, 140)}`);
+      // status estruturado para o retry decidir se vale re-tentar
+      err.status = res.status;
+      throw err;
     }
     const j = await res.json();
     return String(j.choices?.[0]?.message?.content || '').trim();
@@ -93,9 +99,64 @@ async function genOpenAICompatible(prompt, c) {
   }
 }
 
+/**
+ * Erro que não melhora se tentar de novo: chave inválida, request malformado,
+ * modelo inexistente. Re-tentar 401 só gasta latência antes do fallback.
+ * 429 e 5xx SÃO transientes — esses valem retry.
+ */
+function isRetryable(err) {
+  const status = err && err.status;
+  if (!status) return true; // timeout/abort/rede: vale re-tentar
+  if (status === 429) return true;
+  return status >= 500;
+}
+
+async function callProvider(prompt, c) {
+  return c.kind === 'gemini' ? genGemini(prompt, c) : genOpenAICompatible(prompt, c);
+}
+
+/**
+ * Tenta um provider até LLM_MAX_ATTEMPTS vezes, com backoff exponencial
+ * (LLM_RETRY_BASE_MS × 2^n) entre as tentativas. Só re-tenta erro transiente.
+ */
+async function attemptProvider(prompt, c) {
+  const maxAttempts = Math.max(1, Number(process.env.LLM_MAX_ATTEMPTS || DEFAULT_MAX_ATTEMPTS));
+  const baseMs = Number(process.env.LLM_RETRY_BASE_MS || DEFAULT_RETRY_BASE_MS);
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const t0 = Date.now();
+    try {
+      const out = await callProvider(prompt, c);
+      if (out) {
+        console.log(`[llm] ${c.name}/${c.model} ${Date.now() - t0}ms (tentativa ${attempt})`);
+        return out;
+      }
+      lastErr = new Error(`${c.name}: resposta vazia`);
+    } catch (e) {
+      lastErr = e;
+      if (!isRetryable(e)) {
+        console.warn(`[llm] ${c.name} erro não-retryable (${e.message}); indo pro próximo provider`);
+        throw e;
+      }
+    }
+
+    if (attempt < maxAttempts) {
+      const wait = baseMs * 2 ** (attempt - 1);
+      console.warn(
+        `[llm] ${c.name} falhou (${lastErr.message}); retry ${attempt}/${maxAttempts - 1} em ${wait}ms`
+      );
+      await sleep(wait);
+    }
+  }
+
+  throw lastErr;
+}
+
 async function generate(prompt) {
   const chain = chainList();
   let lastErr = null;
+
   for (const name of chain) {
     const c = providerCfg(name);
     c.name = name;
@@ -103,20 +164,15 @@ async function generate(prompt) {
       lastErr = new Error(`${name}: sem chave (envs)`);
       continue;
     }
-    const t0 = Date.now();
     try {
-      const out = c.kind === 'gemini' ? await genGemini(prompt, c) : await genOpenAICompatible(prompt, c);
-      if (out) {
-        console.log(`[llm] ${name}/${c.model} ${Date.now() - t0}ms`);
-        return out;
-      }
-      lastErr = new Error(`${name}: resposta vazia`);
+      return await attemptProvider(prompt, c);
     } catch (e) {
       lastErr = e;
-      console.warn(`[llm] ${name} falhou (${e.message}) ${Date.now() - t0}ms; tentando próximo`);
+      console.warn(`[llm] ${name} esgotado (${e.message}); tentando próximo provider`);
     }
   }
+
   throw lastErr || new Error('nenhum provider respondeu');
 }
 
-module.exports = { generate, providerCfg, chainList };
+module.exports = { generate, providerCfg, chainList, isRetryable };
