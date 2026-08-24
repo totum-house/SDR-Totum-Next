@@ -14,11 +14,11 @@ API Routes (Vercel)
 
 Motor SDR (VPS · PM2 · Node CJS)
   bind 127.0.0.1:3100
-  brain.js portado + flow_runner + manus_client
+  server.js + flow_runner.js + llm_provider.js + manus_client.js
 
 Gateway WhatsApp (VPS · Docker)
   OpenWA v0.23.1
-  bind 127.0.0.1:3000  → Traefik expõe openwa.grupototum.com
+  bind 127.0.0.1:3000  → Traefik expõe zap.grupototum.com
 
 Manus (VPS · já rodando)
   bind 127.0.0.1:8000  → manus.grupototum.com
@@ -39,8 +39,7 @@ sdr-next/
 │   ├── motor/     Motor SDR Node CJS, PM2
 │   └── openwa/    docker-compose OpenWA
 ├── packages/
-│   ├── db/        Supabase client + migrations SQL
-│   └── shared/    Types TS compartilhados
+│   └── db/        Migrations SQL do schema totum_sdr
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── PROTOCOL_CAMADAS.md

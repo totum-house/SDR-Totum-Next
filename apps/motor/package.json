@@ -2,7 +2,7 @@
   "name": "@sdr-next/motor",
   "version": "0.1.0",
   "private": true,
-  "description": "Motor SDR — brain.js + flow_runner + manus_client (Node CJS, PM2)",
+  "description": "Motor SDR — webhook + flow_runner + llm_provider + manus_client (Node CJS, PM2)",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

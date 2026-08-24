@@ -2,7 +2,7 @@
 # SDR-Next — OpenWA (gateway WhatsApp)
 # =========================================================
 # Bind: 127.0.0.1:3000 — NUNCA 0.0.0.0
-# Traefik expõe openwa.grupototum.com (config em Coolify, não aqui)
+# Traefik expõe zap.grupototum.com (config em Coolify, não aqui)
 # =========================================================
 
 services:

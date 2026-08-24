@@ -27,7 +27,7 @@ Cada arquivo pertence a **1 camada única**. Antes de editar, identifique a cama
 
 ### L5 · Integração externa non-critical (🟡 amarelo)
 - `apps/motor/src/manus_client.js`
-- `apps/motor/src/llm_router.js`
+- `apps/motor/src/llm_provider.js`
 
 ### L6 · Integração externa CRITICAL (🟠 laranja — pede aprovação)
 - `apps/openwa/docker-compose.yml`

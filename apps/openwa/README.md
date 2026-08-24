@@ -5,7 +5,7 @@ OpenWA v0.23.1 rodando em Docker. Faz ponte entre WhatsApp Web e o Motor SDR.
 ## Regras críticas
 
 - **Bind exclusivo em `127.0.0.1:3000`** — nunca `0.0.0.0`
-- **Exposição pública apenas via Traefik** (`openwa.grupototum.com`) com Basic Auth
+- **Exposição pública apenas via Traefik** (`zap.grupototum.com`) com Basic Auth
 - **Volume `sessions/` é CRÍTICO** — contém a sessão WhatsApp autenticada; perder = precisa escanear QR de novo
 - **Número: VoIP DID 3131577292** (ver `MEMORY.md`); trocar número exige apagar `sessions/` primeiro
 - **QR code só é escaneado por decisão do Rael** — nunca automático
