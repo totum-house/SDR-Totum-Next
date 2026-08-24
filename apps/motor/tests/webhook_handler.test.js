@@ -343,3 +343,58 @@ describe('trava de warm-up', () => {
     expect(result.warmup_blocked).toBe('daily_limit');
   });
 });
+
+describe('falha no envio via OpenWA', () => {
+  const flow = {
+    id: 'flow-1',
+    graph: {
+      entry_step_id: 'msg1',
+      nodes: [{ id: 'msg1', type: 'message', text: 'Oi!' }],
+      edges: [],
+    },
+  };
+
+  it('sessão não conectada: não persiste a mensagem, não propaga erro (evita retry-storm do OpenWA)', async () => {
+    const supabase = makeSupabase(
+      withQuota({
+        leads: { select: { data: { id: 'lead-1', phone_e164: '5511999999999' }, error: null } },
+        conversations: {
+          select: { data: { id: 'conv-1', context: {}, status: 'open', current_step_id: null }, error: null },
+          update: { data: null, error: null },
+        },
+        flows: { select: { data: flow, error: null } },
+      })
+    );
+    const insertMessages = vi.fn();
+    const originalFrom = supabase.from.bind(supabase);
+    supabase.from = (table) => {
+      const chain = originalFrom(table);
+      if (table === 'messages') {
+        const originalInsert = chain.insert.bind(chain);
+        chain.insert = (payload) => {
+          insertMessages(payload);
+          return originalInsert(payload);
+        };
+      }
+      return chain;
+    };
+    const openwa = { sendMessage: vi.fn().mockRejectedValue(new Error('session not connected')) };
+
+    const result = await dispatchToLead({
+      leadId: 'lead-1',
+      workspaceId: 'ws-1',
+      supabase,
+      openwa,
+      logger: { warn: vi.fn(), error: vi.fn() },
+    });
+
+    // não lança — handleInboundEvent/dispatchToLead resolvem normalmente
+    expect(result.ok).toBe(true);
+    expect(result.outbound).toBe(0);
+    expect(result.send_error).toMatch(/session not connected/);
+    // mensagem outbound NÃO foi gravada — não persiste o que não foi enviado
+    expect(insertMessages).not.toHaveBeenCalledWith(
+      expect.objectContaining({ direction: 'outbound' })
+    );
+  });
+});

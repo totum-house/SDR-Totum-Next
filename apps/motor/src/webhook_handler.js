@@ -109,6 +109,15 @@ async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, 
   const runner = createRunner({ llmGenerate, manusClient, logger });
   const result = await runner.step({ flow, conversation, inboundText });
 
+  // LIMITAÇÃO CONHECIDA: current_step_id avança aqui, ANTES de saber se o
+  // envio abaixo vai dar certo. Se o send falhar, a conversation fica
+  // pensando que já mandou a mensagem deste step — sem retry nem rollback
+  // desse avanço. Aceitável por ora porque OpenWA tem os próprios pacing/
+  // circuit breaker (reduz chance de falha de envio isolada) e a
+  // consequência hoje é "resposta perdida", não corrupção de dado. Reverter
+  // o avanço só no caminho de falha muda o formato do resultado de
+  // runner.step (hoje é side-effect-free) — fica pra quando isso for
+  // observado em produção de verdade, não em teoria.
   const nextContext = { ...(conversation.context || {}), ...result.updates };
   const { error: updateErr } = await supabase
     .from('conversations')
@@ -126,6 +135,7 @@ async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, 
   // flow pode ter mais de uma mensagem, e a cota é por mensagem.
   let sent = 0;
   let blocked = null;
+  let sendError = null;
   for (const msg of result.outboundMessages) {
     const quota = await checkQuota({ supabase, workspaceId });
     if (!quota.allowed) {
@@ -135,13 +145,26 @@ async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, 
       );
       break;
     }
+    // sendMessage ANTES do insert: só grava em messages o que realmente
+    // saiu. Erro aqui NÃO propaga — devolver 500 pro OpenWA dispararia o
+    // retry automático dele (retryCount:3), reprocessando o MESMO evento
+    // inbound como se fosse novo. Num flow com `question` pendente, isso
+    // gravaria o texto do lead como resposta à pergunta errada.
+    try {
+      await openwa.sendMessage(phone, msg.text);
+    } catch (err) {
+      sendError = err.message;
+      logger.error(
+        `[webhook] falha ao enviar via OpenWA (mensagem NÃO persistida): ${err.message}`
+      );
+      break;
+    }
     await supabase.from('messages').insert({
       conversation_id: conversation.id,
       direction: 'outbound',
       content: msg.text,
       message_type: msg.type || 'text',
     });
-    await openwa.sendMessage(phone, msg.text);
     sent += 1;
   }
 
@@ -150,6 +173,7 @@ async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, 
     outbound: sent,
     done: result.done,
     ...(blocked ? { warmup_blocked: blocked } : {}),
+    ...(sendError ? { send_error: sendError } : {}),
   };
 }
 
