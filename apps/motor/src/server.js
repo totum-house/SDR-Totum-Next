@@ -14,6 +14,7 @@
  * quando envs faltam (útil para smoke test local sem banco).
  */
 
+const crypto = require('node:crypto');
 const express = require('express');
 
 const { getSupabaseClient } = require('./supabase_client');
@@ -27,6 +28,22 @@ const WEBHOOK_TOKEN = process.env.OPENWA_WEBHOOK_TOKEN || '';
 // número OpenWA fica para fase futura (precisaria mapear DID → workspace).
 const WORKSPACE_ID = process.env.MOTOR_DEFAULT_WORKSPACE_ID || '';
 
+/**
+ * Compara o header Authorization com o token esperado em tempo constante.
+ *
+ * `a !== b` em string faz short-circuit no primeiro byte divergente, o que
+ * vaza o prefixo correto do token por timing. timingSafeEqual sempre percorre
+ * o buffer inteiro. Como ele exige buffers de mesmo tamanho, o length é
+ * comparado antes — o tamanho do token não é segredo, o conteúdo é.
+ */
+function isAuthorized(authHeader, token) {
+  if (!token) return false;
+  const expected = Buffer.from(`Bearer ${token}`);
+  const received = Buffer.from(authHeader || '');
+  if (expected.length !== received.length) return false;
+  return crypto.timingSafeEqual(expected, received);
+}
+
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
@@ -35,8 +52,7 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/api/webhook/openwa', async (req, res) => {
-  const auth = req.get('Authorization') || '';
-  if (!WEBHOOK_TOKEN || auth !== `Bearer ${WEBHOOK_TOKEN}`) {
+  if (!isAuthorized(req.get('Authorization'), WEBHOOK_TOKEN)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
 
@@ -70,3 +86,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
+module.exports.isAuthorized = isAuthorized;
