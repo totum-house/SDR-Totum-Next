@@ -4,7 +4,7 @@
  * timingSafeEqual exige tratar antes (tamanhos diferentes, token vazio).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import app from '../src/server.js';
 
 const { isAuthorized } = app;
@@ -35,5 +35,24 @@ describe('isAuthorized', () => {
 
   it('rejeita header sem o prefixo Bearer', () => {
     expect(isAuthorized('s3cr3t', 's3cr3t')).toBe(false);
+  });
+});
+
+describe('MOTOR_EXTRA_BIND', () => {
+  it('recusa 0.0.0.0 — nunca bindar em todas as interfaces', async () => {
+    vi.resetModules();
+    process.env.MOTOR_EXTRA_BIND = '0.0.0.0';
+    await expect(import('../src/server.js')).rejects.toThrow(/0\.0\.0\.0/);
+    delete process.env.MOTOR_EXTRA_BIND;
+    vi.resetModules();
+  });
+
+  it('aceita um endereço de bridge Docker normalmente (não lança)', async () => {
+    vi.resetModules();
+    process.env.MOTOR_EXTRA_BIND = '10.0.16.1';
+    const mod = await import('../src/server.js');
+    expect(mod.default).toBeDefined();
+    delete process.env.MOTOR_EXTRA_BIND;
+    vi.resetModules();
   });
 });

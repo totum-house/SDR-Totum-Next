@@ -1,5 +1,5 @@
 /**
- * server.js — Motor SDR HTTP server (Node CJS, bind 127.0.0.1:3100).
+ * server.js — Motor SDR HTTP server (Node CJS, bind 127.0.0.1:3100 por padrão).
  *
  * Endpoints:
  *   GET  /health                  → healthcheck
@@ -7,8 +7,25 @@
  *   POST /api/dispatch/:leadId    → força um step do flow para o lead (dispatch manual)
  *
  * Segurança:
- *   - Bind exclusivo 127.0.0.1 (D-017)
+ *   - Bind padrão 127.0.0.1 (D-017), NUNCA 0.0.0.0
  *   - Webhook valida Authorization: Bearer <OPENWA_WEBHOOK_TOKEN>
+ *
+ * Bind extra (MOTOR_EXTRA_BIND): quando o OpenWA roda em container Docker
+ * numa bridge própria (ex: openwa-network), ele NÃO enxerga 127.0.0.1 do
+ * host — é outro namespace de rede. 127.0.0.1 é estritamente loopback; não
+ * existe rota de container pra host através dele, mesmo com
+ * host.docker.internal/extra_hosts (isso resolve o *nome*, não contorna a
+ * regra do kernel de que loopback só aceita tráfego da própria máquina).
+ *
+ * A correção NÃO é abrir 0.0.0.0 — isso exporia o motor pra qualquer coisa
+ * na máquina e potencialmente pra fora, se houver qualquer forward. A
+ * correção é bindar TAMBÉM no endereço da interface bridge do Docker
+ * (ex: o gateway da rede do OpenWA, tipo 10.0.16.1) — um endereço privado,
+ * não roteável da internet, alcançável só pelos containers daquela bridge
+ * específica. Ver apps/openwa/README.md pra como descobrir esse endereço
+ * (`docker inspect openwa-api`).
+ *
+ * Sem MOTOR_EXTRA_BIND, o comportamento é idêntico ao de antes: só 127.0.0.1.
  *
  * Persistência: chama Supabase self-hosted via @supabase/supabase-js. Stubs
  * quando envs faltam (útil para smoke test local sem banco).
@@ -23,6 +40,11 @@ const { handleInboundEvent, dispatchToLead } = require('./webhook_handler');
 
 const PORT = Number(process.env.MOTOR_PORT || 3100);
 const BIND = process.env.MOTOR_BIND || '127.0.0.1';
+// Endereço adicional pra bindar (ver docstring acima). Nunca use 0.0.0.0 aqui.
+const EXTRA_BIND = (process.env.MOTOR_EXTRA_BIND || '').trim();
+if (EXTRA_BIND === '0.0.0.0') {
+  throw new Error('server.js: MOTOR_EXTRA_BIND=0.0.0.0 não é permitido — bindaria em todas as interfaces');
+}
 const WEBHOOK_TOKEN = process.env.OPENWA_WEBHOOK_TOKEN || '';
 // MVP single-tenant: 1 workspace por deploy do motor. Multi-workspace por
 // número OpenWA fica para fase futura (precisaria mapear DID → workspace).
@@ -108,9 +130,15 @@ app.post('/api/dispatch/:leadId', async (req, res) => {
 });
 
 if (require.main === module) {
-  app.listen(PORT, BIND, () => {
+  const http = require('node:http');
+  http.createServer(app).listen(PORT, BIND, () => {
     console.log(`[motor] escutando em http://${BIND}:${PORT}`);
   });
+  if (EXTRA_BIND) {
+    http.createServer(app).listen(PORT, EXTRA_BIND, () => {
+      console.log(`[motor] escutando também em http://${EXTRA_BIND}:${PORT} (bridge Docker)`);
+    });
+  }
 }
 
 module.exports = app;
