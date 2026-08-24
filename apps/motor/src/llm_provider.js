@@ -23,6 +23,59 @@ const DEFAULT_TIMEOUT = 8000;
 // 1 tentativa + 2 retries por provider antes de cair pro próximo da chain
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_RETRY_BASE_MS = 250;
+// Circuit breaker: após N falhas consecutivas, provider fica de castigo
+const DEFAULT_BREAKER_THRESHOLD = 3;
+const DEFAULT_BREAKER_COOLDOWN_MS = 60_000;
+
+/**
+ * Estado do circuit breaker por provider, em memória do processo.
+ *
+ * Motor roda em instância única (PM2 fork, ver ecosystem.config.cjs), então
+ * estado em memória basta. Se um dia virar cluster, isso precisa migrar pra
+ * store compartilhada — senão cada worker mantém seu próprio contador.
+ *
+ *   name → { failures: number, disabledUntil: epoch_ms }
+ */
+const breakerState = new Map();
+
+function breakerFor(name) {
+  if (!breakerState.has(name)) {
+    breakerState.set(name, { failures: 0, disabledUntil: 0 });
+  }
+  return breakerState.get(name);
+}
+
+function isProviderDisabled(name, now = Date.now()) {
+  return breakerFor(name).disabledUntil > now;
+}
+
+function recordSuccess(name) {
+  const s = breakerFor(name);
+  s.failures = 0;
+  s.disabledUntil = 0;
+}
+
+function recordFailure(name, now = Date.now()) {
+  const s = breakerFor(name);
+  const threshold = Math.max(1, Number(process.env.LLM_BREAKER_THRESHOLD || DEFAULT_BREAKER_THRESHOLD));
+  const cooldown = Number(process.env.LLM_BREAKER_COOLDOWN_MS || DEFAULT_BREAKER_COOLDOWN_MS);
+  s.failures += 1;
+  if (s.failures >= threshold) {
+    s.disabledUntil = now + cooldown;
+    console.warn(`[llm] circuit breaker ABERTO para ${name} por ${cooldown}ms (${s.failures} falhas)`);
+  }
+}
+
+/** Exposto para testes e para um eventual endpoint de operação. */
+function resetBreakers() {
+  breakerState.clear();
+}
+
+function breakerSnapshot() {
+  return Object.fromEntries(
+    [...breakerState.entries()].map(([k, v]) => [k, { ...v }])
+  );
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -164,10 +217,18 @@ async function generate(prompt) {
       lastErr = new Error(`${name}: sem chave (envs)`);
       continue;
     }
+    if (isProviderDisabled(name)) {
+      lastErr = new Error(`${name}: circuit breaker aberto`);
+      console.warn(`[llm] ${name} pulado — circuit breaker aberto`);
+      continue;
+    }
     try {
-      return await attemptProvider(prompt, c);
+      const out = await attemptProvider(prompt, c);
+      recordSuccess(name);
+      return out;
     } catch (e) {
       lastErr = e;
+      recordFailure(name);
       console.warn(`[llm] ${name} esgotado (${e.message}); tentando próximo provider`);
     }
   }
@@ -175,4 +236,12 @@ async function generate(prompt) {
   throw lastErr || new Error('nenhum provider respondeu');
 }
 
-module.exports = { generate, providerCfg, chainList, isRetryable };
+module.exports = {
+  generate,
+  providerCfg,
+  chainList,
+  isRetryable,
+  resetBreakers,
+  breakerSnapshot,
+  isProviderDisabled,
+};

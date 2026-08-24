@@ -7,7 +7,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { generate, isRetryable } from '../src/llm_provider.js';
+import {
+  generate,
+  isRetryable,
+  resetBreakers,
+  isProviderDisabled,
+} from '../src/llm_provider.js';
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -35,6 +40,7 @@ beforeEach(() => {
   process.env.LLM_RETRY_BASE_MS = '1'; // mantém o teste rápido
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
+  resetBreakers();
 });
 
 afterEach(() => {
@@ -119,5 +125,85 @@ describe('generate — retry por provider', () => {
 
     await expect(generate('oi')).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(6); // 3 tentativas × 2 providers
+  });
+});
+
+describe('circuit breaker por provider', () => {
+  it('abre depois de 3 falhas consecutivas e passa a pular o provider', async () => {
+    process.env.LLM_CHAIN = 'groq';
+    const fetchMock = vi.fn().mockResolvedValue(errResponse(500));
+    vi.stubGlobal('fetch', fetchMock);
+
+    // 1ª chamada: esgota as 3 tentativas → 1 falha registrada
+    await expect(generate('oi')).rejects.toThrow();
+    expect(isProviderDisabled('groq')).toBe(false);
+
+    await expect(generate('oi')).rejects.toThrow();
+    expect(isProviderDisabled('groq')).toBe(false);
+
+    // 3ª falha consecutiva → breaker abre
+    await expect(generate('oi')).rejects.toThrow();
+    expect(isProviderDisabled('groq')).toBe(true);
+
+    // 4ª chamada nem toca a rede
+    const before = fetchMock.mock.calls.length;
+    await expect(generate('oi')).rejects.toThrow(/circuit breaker/);
+    expect(fetchMock.mock.calls.length).toBe(before);
+  });
+
+  it('sucesso zera o contador de falhas', async () => {
+    process.env.LLM_CHAIN = 'groq';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(errResponse(500))
+      .mockResolvedValueOnce(errResponse(500))
+      .mockResolvedValueOnce(errResponse(500))
+      .mockResolvedValue(okResponse('voltou'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generate('oi')).rejects.toThrow(); // falha 1
+    await expect(generate('oi')).resolves.toBe('voltou'); // sucesso zera
+
+    // duas falhas novas não bastam pra abrir (contador foi zerado)
+    fetchMock.mockResolvedValue(errResponse(500));
+    await expect(generate('oi')).rejects.toThrow();
+    await expect(generate('oi')).rejects.toThrow();
+    expect(isProviderDisabled('groq')).toBe(false);
+  });
+
+  it('breaker aberto no provider 1 faz a chain usar o provider 2', async () => {
+    process.env.LLM_CHAIN = 'groq,nvidia';
+    process.env.LLM_BREAKER_THRESHOLD = '1';
+    const fetchMock = vi.fn().mockResolvedValue(errResponse(500));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generate('oi')).rejects.toThrow();
+    expect(isProviderDisabled('groq')).toBe(true);
+    expect(isProviderDisabled('nvidia')).toBe(true);
+
+    resetBreakers();
+    process.env.LLM_BREAKER_THRESHOLD = '1';
+    const fetch2 = vi
+      .fn()
+      .mockResolvedValueOnce(errResponse(500)) // groq falha, abre
+      .mockResolvedValue(okResponse('nvidia ok'));
+    vi.stubGlobal('fetch', fetch2);
+    await expect(generate('oi')).resolves.toBe('nvidia ok');
+  });
+
+  it('cooldown expirado reabilita o provider', async () => {
+    process.env.LLM_CHAIN = 'groq';
+    process.env.LLM_BREAKER_THRESHOLD = '1';
+    process.env.LLM_BREAKER_COOLDOWN_MS = '0'; // expira imediatamente
+    process.env.LLM_MAX_ATTEMPTS = '1'; // sem retry: 1 falha já esgota o provider
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(errResponse(500))
+      .mockResolvedValue(okResponse('voltou'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(generate('oi')).rejects.toThrow();
+    expect(isProviderDisabled('groq')).toBe(false); // cooldown 0 = já liberado
+    await expect(generate('oi')).resolves.toBe('voltou');
   });
 });
