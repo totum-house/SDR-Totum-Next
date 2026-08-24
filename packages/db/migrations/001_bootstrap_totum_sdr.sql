@@ -45,6 +45,7 @@ CREATE TABLE totum_sdr.workspaces (
   name         TEXT NOT NULL,
   owner_email  TEXT NOT NULL,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   settings     JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
@@ -79,7 +80,11 @@ CREATE TABLE totum_sdr.conversations (
   current_step_id   TEXT,
   context           JSONB NOT NULL DEFAULT '{}'::jsonb,
   started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- last_activity_at = timestamp semântico (última mensagem trocada), setado
+  -- explicitamente pelo motor. updated_at = timestamp técnico de qualquer
+  -- UPDATE na linha, mantido pelo trigger. São propósitos diferentes.
   last_activity_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (status IN ('open', 'waiting_human', 'closed'))
 );
 CREATE INDEX idx_conversations_workspace ON totum_sdr.conversations (workspace_id, status, last_activity_at DESC);
@@ -189,6 +194,14 @@ CREATE TRIGGER trg_leads_updated_at
 
 CREATE TRIGGER trg_flows_updated_at
   BEFORE UPDATE ON totum_sdr.flows
+  FOR EACH ROW EXECUTE FUNCTION totum_sdr.set_updated_at();
+
+CREATE TRIGGER trg_workspaces_updated_at
+  BEFORE UPDATE ON totum_sdr.workspaces
+  FOR EACH ROW EXECUTE FUNCTION totum_sdr.set_updated_at();
+
+CREATE TRIGGER trg_conversations_updated_at
+  BEFORE UPDATE ON totum_sdr.conversations
   FOR EACH ROW EXECUTE FUNCTION totum_sdr.set_updated_at();
 
 COMMIT;
