@@ -10,6 +10,7 @@
 const { createRunner } = require('./flow_runner');
 const { generate: llmGenerate } = require('./llm_provider');
 const manusClient = require('./manus_client');
+const { checkQuota } = require('./warmup');
 
 /**
  * Contrato ASSUMIDO do payload do webhook OpenWA (wa-automate-like) —
@@ -85,7 +86,7 @@ async function findActiveFlow(supabase, workspaceId) {
  * Compartilhado entre o webhook (inbound do lead) e o dispatch manual
  * (sem inbound) — a única diferença entre os dois é o inboundText.
  */
-async function runFlowStep({ supabase, openwa, flow, conversation, phone, inboundText, logger }) {
+async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, phone, inboundText, logger = console }) {
   const runner = createRunner({ llmGenerate, manusClient, logger });
   const result = await runner.step({ flow, conversation, inboundText });
 
@@ -102,7 +103,19 @@ async function runFlowStep({ supabase, openwa, flow, conversation, phone, inboun
     .eq('id', conversation.id);
   if (updateErr) throw updateErr;
 
+  // Trava de warm-up: checa a cota ANTES de cada envio. Uma resposta do
+  // flow pode ter mais de uma mensagem, e a cota é por mensagem.
+  let sent = 0;
+  let blocked = null;
   for (const msg of result.outboundMessages) {
+    const quota = await checkQuota({ supabase, workspaceId });
+    if (!quota.allowed) {
+      blocked = quota.reason;
+      logger.warn(
+        `[warmup] envio bloqueado (${quota.reason}) — ${result.outboundMessages.length - sent} mensagem(ns) não enviada(s)`
+      );
+      break;
+    }
     await supabase.from('messages').insert({
       conversation_id: conversation.id,
       direction: 'outbound',
@@ -110,9 +123,15 @@ async function runFlowStep({ supabase, openwa, flow, conversation, phone, inboun
       message_type: msg.type || 'text',
     });
     await openwa.sendMessage(phone, msg.text);
+    sent += 1;
   }
 
-  return { ok: true, outbound: result.outboundMessages.length, done: result.done };
+  return {
+    ok: true,
+    outbound: sent,
+    done: result.done,
+    ...(blocked ? { warmup_blocked: blocked } : {}),
+  };
 }
 
 async function handleInboundEvent({ body, workspaceId, supabase, openwa, logger = console }) {
@@ -143,6 +162,7 @@ async function handleInboundEvent({ body, workspaceId, supabase, openwa, logger 
     openwa,
     flow,
     conversation,
+    workspaceId,
     phone: parsed.phone_e164,
     inboundText: parsed.text,
     logger,
@@ -177,6 +197,7 @@ async function dispatchToLead({ leadId, workspaceId, supabase, openwa, logger = 
     openwa,
     flow,
     conversation,
+    workspaceId,
     phone: lead.phone_e164,
     inboundText: null,
     logger,
