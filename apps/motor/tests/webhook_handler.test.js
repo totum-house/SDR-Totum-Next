@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { handleInboundEvent, parseInboundEvent } from '../src/webhook_handler.js';
+import { handleInboundEvent, dispatchToLead, parseInboundEvent } from '../src/webhook_handler.js';
 
 function makeSupabase(responses) {
   function chainFor(table) {
@@ -126,5 +126,78 @@ describe('handleInboundEvent', () => {
     });
 
     expect(result.persisted).toBe(true);
+  });
+});
+
+describe('dispatchToLead', () => {
+  const flow = {
+    id: 'flow-1',
+    graph: {
+      entry_step_id: 'msg1',
+      nodes: [{ id: 'msg1', type: 'message', text: 'Primeira abordagem' }],
+      edges: [],
+    },
+  };
+
+  it('lead inexistente: retorna lead_not_found sem chamar OpenWA', async () => {
+    const supabase = makeSupabase({ leads: { select: { data: null, error: null } } });
+    const openwa = { sendMessage: vi.fn() };
+
+    const result = await dispatchToLead({
+      leadId: 'nope',
+      workspaceId: 'ws-1',
+      supabase,
+      openwa,
+      logger: { warn: vi.fn(), error: vi.fn() },
+    });
+
+    expect(result).toEqual({ ok: false, error: 'lead_not_found' });
+    expect(openwa.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('sem flow ativo: retorna no_active_flow', async () => {
+    const supabase = makeSupabase({
+      leads: { select: { data: { id: 'lead-1', phone_e164: '5511999999999' }, error: null } },
+      conversations: {
+        select: { data: { id: 'conv-1', context: {}, status: 'open', current_step_id: null }, error: null },
+      },
+      flows: { select: { data: null, error: null } },
+    });
+    const openwa = { sendMessage: vi.fn() };
+
+    const result = await dispatchToLead({
+      leadId: 'lead-1',
+      workspaceId: 'ws-1',
+      supabase,
+      openwa,
+      logger: { warn: vi.fn(), error: vi.fn() },
+    });
+
+    expect(result).toEqual({ ok: false, error: 'no_active_flow' });
+    expect(openwa.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('caminho feliz: roda o step sem inbound e envia outbound pro telefone do lead', async () => {
+    const supabase = makeSupabase({
+      leads: { select: { data: { id: 'lead-1', phone_e164: '5511999999999' }, error: null } },
+      conversations: {
+        select: { data: { id: 'conv-1', context: {}, status: 'open', current_step_id: null }, error: null },
+        update: { data: null, error: null },
+      },
+      messages: { insert: { data: null, error: null } },
+      flows: { select: { data: flow, error: null } },
+    });
+    const openwa = { sendMessage: vi.fn().mockResolvedValue({ ok: true }) };
+
+    const result = await dispatchToLead({
+      leadId: 'lead-1',
+      workspaceId: 'ws-1',
+      supabase,
+      openwa,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outbound).toBe(1);
+    expect(openwa.sendMessage).toHaveBeenCalledWith('5511999999999', 'Primeira abordagem');
   });
 });

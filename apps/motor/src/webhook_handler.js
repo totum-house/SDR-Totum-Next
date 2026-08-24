@@ -78,6 +78,43 @@ async function findActiveFlow(supabase, workspaceId) {
   return data || null;
 }
 
+/**
+ * Roda um step do flow e materializa o resultado: persiste os updates da
+ * conversation, grava cada outbound em messages e envia via OpenWA.
+ *
+ * Compartilhado entre o webhook (inbound do lead) e o dispatch manual
+ * (sem inbound) — a única diferença entre os dois é o inboundText.
+ */
+async function runFlowStep({ supabase, openwa, flow, conversation, phone, inboundText, logger }) {
+  const runner = createRunner({ llmGenerate, manusClient, logger });
+  const result = await runner.step({ flow, conversation, inboundText });
+
+  const nextContext = { ...(conversation.context || {}), ...result.updates };
+  const { error: updateErr } = await supabase
+    .from('conversations')
+    .update({
+      current_step_id: result.nextStepId,
+      current_flow_id: flow.id,
+      context: nextContext,
+      status: result.done ? 'closed' : conversation.status,
+      last_activity_at: new Date().toISOString(),
+    })
+    .eq('id', conversation.id);
+  if (updateErr) throw updateErr;
+
+  for (const msg of result.outboundMessages) {
+    await supabase.from('messages').insert({
+      conversation_id: conversation.id,
+      direction: 'outbound',
+      content: msg.text,
+      message_type: msg.type || 'text',
+    });
+    await openwa.sendMessage(phone, msg.text);
+  }
+
+  return { ok: true, outbound: result.outboundMessages.length, done: result.done };
+}
+
 async function handleInboundEvent({ body, workspaceId, supabase, openwa, logger = console }) {
   const parsed = parseInboundEvent(body);
   if (!parsed) {
@@ -101,37 +138,49 @@ async function handleInboundEvent({ body, workspaceId, supabase, openwa, logger 
     return { ok: true, persisted: true, flow: null };
   }
 
-  const runner = createRunner({ llmGenerate, manusClient: manusClient, logger });
-  const result = await runner.step({
+  return runFlowStep({
+    supabase,
+    openwa,
     flow,
     conversation,
+    phone: parsed.phone_e164,
     inboundText: parsed.text,
+    logger,
   });
-
-  const nextContext = { ...(conversation.context || {}), ...result.updates };
-  const { error: updateErr } = await supabase
-    .from('conversations')
-    .update({
-      current_step_id: result.nextStepId,
-      current_flow_id: flow.id,
-      context: nextContext,
-      status: result.done ? 'closed' : conversation.status,
-      last_activity_at: new Date().toISOString(),
-    })
-    .eq('id', conversation.id);
-  if (updateErr) throw updateErr;
-
-  for (const msg of result.outboundMessages) {
-    await supabase.from('messages').insert({
-      conversation_id: conversation.id,
-      direction: 'outbound',
-      content: msg.text,
-      message_type: msg.type || 'text',
-    });
-    await openwa.sendMessage(parsed.phone_e164, msg.text);
-  }
-
-  return { ok: true, outbound: result.outboundMessages.length, done: result.done };
 }
 
-module.exports = { handleInboundEvent, parseInboundEvent };
+/**
+ * Dispatch manual: força um step do flow para um lead existente, sem
+ * mensagem inbound. Usado para iniciar conversa outbound (ex: primeira
+ * abordagem) ou destravar uma conversation parada.
+ */
+async function dispatchToLead({ leadId, workspaceId, supabase, openwa, logger = console }) {
+  const { data: lead, error: leadErr } = await supabase
+    .from('leads')
+    .select('*')
+    .eq('workspace_id', workspaceId)
+    .eq('id', leadId)
+    .maybeSingle();
+  if (leadErr) throw leadErr;
+  if (!lead) return { ok: false, error: 'lead_not_found' };
+
+  const conversation = await findOrCreateConversation(supabase, workspaceId, lead);
+
+  const flow = await findActiveFlow(supabase, workspaceId);
+  if (!flow) {
+    logger.warn(`[dispatch] workspace ${workspaceId} sem flow ativo`);
+    return { ok: false, error: 'no_active_flow' };
+  }
+
+  return runFlowStep({
+    supabase,
+    openwa,
+    flow,
+    conversation,
+    phone: lead.phone_e164,
+    inboundText: null,
+    logger,
+  });
+}
+
+module.exports = { handleInboundEvent, dispatchToLead, parseInboundEvent };

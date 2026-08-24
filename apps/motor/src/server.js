@@ -19,7 +19,7 @@ const express = require('express');
 
 const { getSupabaseClient } = require('./supabase_client');
 const openwa = require('./openwa_client');
-const { handleInboundEvent } = require('./webhook_handler');
+const { handleInboundEvent, dispatchToLead } = require('./webhook_handler');
 
 const PORT = Number(process.env.MOTOR_PORT || 3100);
 const BIND = process.env.MOTOR_BIND || '127.0.0.1';
@@ -75,6 +75,34 @@ app.post('/api/webhook/openwa', async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('[webhook] erro processando evento:', err.message);
+    res.status(500).json({ error: 'internal', message: err.message });
+  }
+});
+
+app.post('/api/dispatch/:leadId', async (req, res) => {
+  if (!isAuthorized(req.get('Authorization'), WEBHOOK_TOKEN)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const supabase = getSupabaseClient();
+  if (!supabase || !WORKSPACE_ID) {
+    return res.status(503).json({ error: 'not_configured' });
+  }
+
+  try {
+    const result = await dispatchToLead({
+      leadId: req.params.leadId,
+      workspaceId: WORKSPACE_ID,
+      supabase,
+      openwa,
+    });
+    if (!result.ok) {
+      const code = result.error === 'lead_not_found' ? 404 : 409;
+      return res.status(code).json(result);
+    }
+    res.json(result);
+  } catch (err) {
+    console.error('[dispatch] erro:', err.message);
     res.status(500).json({ error: 'internal', message: err.message });
   }
 });
