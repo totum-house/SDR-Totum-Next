@@ -32,6 +32,10 @@
  */
 
 const crypto = require('node:crypto');
+// Carrega .env do cwd (apps/motor/.env em produção via PM2 — ver
+// ecosystem.config.cjs). Nunca lança se o arquivo não existir: seguro
+// também em teste/CI, onde as envs vêm direto de process.env.
+require('dotenv').config();
 const express = require('express');
 
 const { getSupabaseClient } = require('./supabase_client');
