@@ -48,9 +48,15 @@ Migrations versionadas para o Supabase self-hosted (`supa.grupototum.com`).
 > `azl`, `hub`, `os`, `pepper`, `totum_os`, `totum_system`, `sdr`,
 > `authenticative`. Por isso a regra de schema dedicado.
 >
-> Nota: `sdr` (3 tabelas: leads_sdr, sdr_memories, sdr_sessions) é do
-> SDR-Totum-engine antigo e está VAZIO — verificado 2026-08-24. Não
-> confundir com `totum_sdr`, que é o schema deste projeto.
+> Nota: `sdr` (leads_sdr, sdr_memories, sdr_sessions) é do SDR-Totum-engine
+> antigo. **NÃO está vazio**: contagem real em 2026-08-24 deu
+> leads_sdr=0, sdr_memories=53, sdr_sessions=0. Não confundir com
+> `totum_sdr`, que é o schema deste projeto — e não dropar `sdr` sem
+> antes decidir o que fazer com essas 53 linhas.
+>
+> ⚠️ `pg_stat_user_tables.n_live_tup` reportou 0 para as três tabelas,
+> o que era FALSO (as stats nunca rodaram ali). Para saber se uma tabela
+> tem dados, use `count(*)`, não a estimativa do coletor.
 
 ```bash
 # Estes comandos rodam DENTRO do VPS (você já está logado nele).
