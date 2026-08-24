@@ -16,6 +16,34 @@ Migrations versionadas para o Supabase self-hosted (`supa.grupototum.com`).
 |---|--------------------------------------|---------|-------------------------------------|
 | 001 | `001_bootstrap_totum_sdr.sql`      | pending | Schema + 8 tabelas + RLS (enable + policies owner-only) |
 | 002 | `002_totum_sdr_workspace_members.sql` | TBD  | Tabela de membros + policies revisadas (multi-usuário por workspace) |
+| 00X | `00X_totum_sdr_memories.sql`       | BACKLOG | Memória semântica pgvector — ver "Gap conhecido" abaixo |
+
+### Gap conhecido: totum_sdr não tem memória semântica
+
+O SDR-Totum-engine antigo tinha uma capacidade que este schema **não
+reproduz**. A tabela `sdr.sdr_memories` (schema antigo, ainda no banco) é:
+
+```
+id             uuid
+id_lead        text            -- telefone do lead
+embedding      vector(1024)    -- ivfflat, vector_cosine_ops
+texto_original text
+etapa_funil    text
+timestamp      timestamptz
+```
+
+Ou seja: **recall semântico por similaridade**, indexado por lead e por
+etapa de funil. O `totum_sdr` guarda só `messages` (texto puro) e
+`conversations.context` (JSON) — não há busca por similaridade.
+
+Verificado em 2026-08-24: 53 memórias reais de junho/2026, de leads de
+produção. Decisão tomada na mesma data: **não migrar esses dados** (são
+fragmentos, e `sdr.leads_sdr` está vazio, então falta o vínculo com quem
+é o lead) e **não implementar vetores antes do sistema rodar** — vira
+migration própria depois do primeiro ciclo real.
+
+`pgvector` já está disponível neste Postgres, então adicionar depois é
+uma migration, não uma reinstalação.
 
 ### Modelo de RLS da 001 (owner-only)
 
