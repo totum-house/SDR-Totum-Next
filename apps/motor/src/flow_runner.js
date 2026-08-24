@@ -18,6 +18,33 @@
  * server.js. Isso facilita testar sem Supabase.
  */
 
+// Texto vindo do lead entra no context e é interpolado nos prompts do LLM
+// (stepImprovise monta o prompt com __history + inboundText). Sem limite,
+// uma mensagem gigante estoura o context window; sem escape, o lead pode
+// forjar tags de sistema e tentar prompt injection.
+const MAX_INBOUND_LEN = 2000;
+
+/**
+ * Sanitiza texto vindo do lead antes de gravar em context.
+ *
+ * - remove caracteres de controle (menos \n e \t)
+ * - neutraliza `<...>` virando `‹...›` — preserva o que a pessoa escreveu
+ *   de forma legível, mas impede que o texto se passe por tag de sistema
+ * - trunca em MAX_INBOUND_LEN, marcando o corte
+ */
+function sanitizeInbound(text) {
+  if (text == null) return text;
+  let s = String(text);
+  // Remove controles C0/C1 preservando \n e \t.
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+  s = s.replace(/</g, '\u2039').replace(/>/g, '\u203A');
+  if (s.length > MAX_INBOUND_LEN) {
+    s = `${s.slice(0, MAX_INBOUND_LEN)}\u2026[truncado]`;
+  }
+  return s;
+}
+
 function renderTemplate(text, vars = {}) {
   return String(text || '').replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (m, k) => {
     const parts = k.split('.');
@@ -92,9 +119,10 @@ function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
         updates: { awaiting_inbound: true },
       };
     }
-    // Chegou inbound: grava em context[var_name] e avança
+    // Chegou inbound: grava em context[var_name] e avança.
+    // Sanitiza antes de persistir — esse valor volta nos prompts do LLM.
     const updates = {};
-    if (node.save_as) updates[node.save_as] = inboundText;
+    if (node.save_as) updates[node.save_as] = sanitizeInbound(inboundText);
     return {
       outboundMessages: [],
       nextStepId: findEdgeTarget({ graph: ctx.__flow.graph }, node.id),
@@ -132,8 +160,10 @@ function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
       ...(node.success_criteria || []).map((c) => `- ${c}`),
       ``,
       `Histórico da conversa:`,
-      ...(ctx.__history || []).map((h) => `[${h.direction}] ${h.content}`),
-      inboundText ? `\nÚltima mensagem do lead: ${inboundText}` : '',
+      // Conteúdo escrito pelo lead é DADO, nunca instrução — sanitiza antes
+      // de entrar no prompt pra ele não forjar tag de sistema.
+      ...(ctx.__history || []).map((h) => `[${h.direction}] ${sanitizeInbound(h.content)}`),
+      inboundText ? `\nÚltima mensagem do lead: ${sanitizeInbound(inboundText)}` : '',
       ``,
       `Responda um JSON válido: {"reply": "mensagem curta", "goal_reached": true|false}`,
     ].join('\n');
@@ -221,4 +251,11 @@ function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
   return { step, renderTemplate, evalCondition };
 }
 
-module.exports = { createRunner, renderTemplate, evalCondition, findNode, findEdgeTarget };
+module.exports = {
+  createRunner,
+  renderTemplate,
+  evalCondition,
+  findNode,
+  findEdgeTarget,
+  sanitizeInbound,
+};
