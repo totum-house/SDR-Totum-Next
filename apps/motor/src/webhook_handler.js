@@ -13,13 +13,32 @@ const manusClient = require('./manus_client');
 const { checkQuota } = require('./warmup');
 
 /**
- * Contrato ASSUMIDO do payload do webhook OpenWA (wa-automate-like) —
- * a validar contra o gateway real. Ver docs/OPENWA_API.md.
+ * Contrato VERIFICADO em 2026-08-24 contra o gateway real
+ * (rmyndharis/OpenWA). Dois fatos confirmados no Swagger
+ * (127.0.0.1:2785/api/docs-json) e no endpoint oficial de teste
+ * (POST /webhooks/{id}/test):
+ *
+ * 1) Todo webhook chega ENVELOPADO:
+ *      { event, timestamp, sessionId, idempotencyKey, deliveryId, data }
+ *    Os campos da mensagem ficam dentro de `data`, não no topo do body
+ *    — testado com o endpoint oficial, que devolve exatamente essa
+ *    forma. Sem isso, TODO evento real seria descartado em silêncio
+ *    (`skipped: no_sender`), sem log de erro nenhum.
+ *
+ * 2) O formato de `data` para uma mensagem é o MessageListItemDto do
+ *    Swagger: campos reais são `from`, `body`, `waMessageId` (id da
+ *    mensagem no protocolo WhatsApp; `id` é o id interno do OpenWA,
+ *    fallback quando waMessageId ainda não foi atribuído).
+ *
+ * Aceita também o payload sem envelope (`data` ausente), como rede de
+ * segurança — não custa nada e cobre o caso de outra versão do
+ * OpenWA mudar o formato de novo.
  */
 function parseInboundEvent(body) {
-  const from = body?.from || body?.sender?.id || body?.author || null;
-  const text = body?.body ?? body?.text ?? body?.content ?? '';
-  const messageId = body?.id || body?.messageId || null;
+  const msg = body?.data && typeof body.data === 'object' ? body.data : body;
+  const from = msg?.from || msg?.author || null;
+  const text = msg?.body ?? msg?.text ?? '';
+  const messageId = msg?.waMessageId || msg?.id || null;
   if (!from) return null;
   const phone = String(from).replace(/@c\.us$|@g\.us$/, '');
   return { phone_e164: phone, text: String(text || ''), openwa_message_id: messageId };

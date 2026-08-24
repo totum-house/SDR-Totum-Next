@@ -57,8 +57,41 @@ function withQuota(responses, { conversationIds = ['conv-1'], sentToday = 0 } = 
 
 const inboundBody = { from: '5511999999999@c.us', body: 'oi' };
 
+// Formato real, confirmado em 2026-08-24 contra POST /webhooks/{id}/test:
+// { event, timestamp, sessionId, idempotencyKey, deliveryId, data: {...} }
+const realEnvelope = {
+  event: 'message.received',
+  timestamp: '2026-08-24T20:00:00Z',
+  sessionId: '11e1b06b-7ca7-4095-8acc-75eb198a3dc6',
+  idempotencyKey: 'evt_abc123',
+  deliveryId: 'dlv_xyz789',
+  data: {
+    id: 'internal-uuid-1',
+    waMessageId: 'true_5511999999999@c.us_3EB0ABCDEF',
+    chatId: '5511999999999@c.us',
+    from: '5511999999999@c.us',
+    to: '5511888888888@c.us',
+    body: 'oi',
+    type: 'text',
+    direction: 'incoming',
+  },
+};
+
 describe('parseInboundEvent', () => {
-  it('extrai phone/text de um payload wa-automate-like', () => {
+  it('extrai phone/text/waMessageId do envelope real (data.*)', () => {
+    expect(parseInboundEvent(realEnvelope)).toEqual({
+      phone_e164: '5511999999999',
+      text: 'oi',
+      openwa_message_id: 'true_5511999999999@c.us_3EB0ABCDEF',
+    });
+  });
+
+  it('cai pro id interno do OpenWA quando waMessageId ainda não foi atribuído', () => {
+    const envelope = { data: { ...realEnvelope.data, waMessageId: undefined } };
+    expect(parseInboundEvent(envelope).openwa_message_id).toBe('internal-uuid-1');
+  });
+
+  it('aceita payload sem envelope, como rede de segurança', () => {
     expect(parseInboundEvent(inboundBody)).toEqual({
       phone_e164: '5511999999999',
       text: 'oi',
@@ -66,8 +99,9 @@ describe('parseInboundEvent', () => {
     });
   });
 
-  it('retorna null sem remetente reconhecível', () => {
+  it('retorna null sem remetente reconhecível, com ou sem envelope', () => {
     expect(parseInboundEvent({ body: 'oi' })).toBe(null);
+    expect(parseInboundEvent({ data: { body: 'oi' } })).toBe(null);
   });
 });
 
