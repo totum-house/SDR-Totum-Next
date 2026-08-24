@@ -30,6 +30,11 @@
 
 BEGIN;
 
+-- gen_random_uuid() é nativo no PostgreSQL 13+, mas esta migration usa a
+-- função em 8 DEFAULTs — garantir pgcrypto torna o script seguro também
+-- em instâncias < PG13. IF NOT EXISTS é idempotente e no-op no PG13+.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE SCHEMA IF NOT EXISTS totum_sdr;
 
 -- --------------------------------------------------------------
