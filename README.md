@@ -17,8 +17,8 @@ Motor SDR (VPS · PM2 · Node CJS)
   server.js + flow_runner.js + llm_provider.js + manus_client.js
 
 Gateway WhatsApp (VPS · Docker)
-  OpenWA v0.23.1
-  bind 127.0.0.1:3000  → Traefik expõe zap.grupototum.com
+  rmyndharis/OpenWA — API REST com Swagger, escopada por sessão
+  bind 127.0.0.1:2785  → acesso hoje via túnel SSH (não exposto)
 
 Manus (VPS · já rodando)
   bind 127.0.0.1:8000  → manus.grupototum.com
@@ -73,12 +73,12 @@ cd apps/web && pnpm dev
 # Motor SDR
 cd apps/motor && pnpm dev
 
-# OpenWA (Docker)
-cd apps/openwa && docker compose up -d
+# OpenWA — instância real fica em /opt/OpenWA no VPS (repo próprio deles,
+# clonado direto lá). Não há compose neste monorepo. Ver apps/openwa/README.md
 ```
 
 Portas locais:
-- `127.0.0.1:3000` — OpenWA (Docker)
+- `127.0.0.1:2785` — OpenWA (no VPS; local só se você clonar o repo deles)
 - `127.0.0.1:3100` — Motor SDR (PM2/node)
 - `127.0.0.1:3200` — Frontend Next dev (`pnpm dev`)
 

@@ -1,38 +1,133 @@
 /**
- * openwa_client.js — client HTTP para o gateway OpenWA (wa-automate), envio de mensagem.
+ * openwa_client.js — client HTTP para o gateway OpenWA (rmyndharis/OpenWA).
  *
- * Contrato ASSUMIDO (stub — a validar contra o gateway real rodando,
- * mesmo espírito de manus_client.js / docs/MANUS_API.md):
- *   POST {OPENWA_URL}/sendText { to: "<phone>@c.us", text: "<msg>" }
- *   Header opcional: x-api-key: <OPENWA_API_KEY ou OPENWA_WEBHOOK_TOKEN>
+ * Contrato VERIFICADO em 2026-08-24 contra o Swagger da instância real
+ * (http://127.0.0.1:2785/api/docs-json). Não é mais suposição.
  *
- * Se a API real divergir (endpoint, header, payload), ajustar aqui e
- * documentar em docs/OPENWA_API.md no mesmo commit.
+ * Fatos do contrato que moldam este arquivo:
+ *   - porta 2785, API sob /api (não 3000, não na raiz)
+ *   - auth global por header `X-API-Key`
+ *   - TUDO é escopado por sessão: /api/sessions/{sessionId}/...
+ *   - envio de texto: POST /api/sessions/{id}/messages/send-text
+ *     body { chatId: "<phone>@c.us", text } — text tem maxLength 4096
  *
  * Envs:
- *   OPENWA_URL        default http://127.0.0.1:3000
- *   OPENWA_API_KEY    opcional; cai pra OPENWA_WEBHOOK_TOKEN se ausente
+ *   OPENWA_URL         default http://127.0.0.1:2785
+ *   OPENWA_API_KEY     obrigatório (header X-API-Key)
+ *   OPENWA_SESSION_ID  obrigatório — a sessão que envia
  */
 
 const axios = require('axios');
 
-const OPENWA_URL = process.env.OPENWA_URL || 'http://127.0.0.1:3000';
-const OPENWA_API_KEY = process.env.OPENWA_API_KEY || process.env.OPENWA_WEBHOOK_TOKEN || '';
+const OPENWA_URL = (process.env.OPENWA_URL || 'http://127.0.0.1:2785').replace(/\/$/, '');
+const OPENWA_API_KEY = process.env.OPENWA_API_KEY || '';
+const OPENWA_SESSION_ID = process.env.OPENWA_SESSION_ID || '';
 
-async function sendMessage(phoneE164, text) {
-  if (!phoneE164 || !text) {
-    throw new Error('openwa_client: phoneE164 e text são obrigatórios');
-  }
+// Limite do próprio contrato (send-text.text.maxLength). O guardrail do
+// flow_runner corta bem antes (MAX_REPLY_LEN=900); isto aqui é só a rede
+// de proteção pra nunca tomar 400 do gateway.
+const MAX_TEXT_LEN = 4096;
+
+// Seam de teste: injeta um http client fake (post/get) em vez do axios real.
+// Necessário porque este módulo usa require('axios') (CJS) e mockar o pacote
+// via vi.mock/spyOn não intercepta esse caminho de forma confiável — mesmo
+// espírito da injeção de dependência já usada em flow_runner.js/createRunner.
+let _testHttpClient = null;
+function __setHttpClientForTests(client) {
+  _testHttpClient = client;
+}
+
+function api() {
+  if (_testHttpClient) return _testHttpClient;
   const headers = { 'Content-Type': 'application/json' };
-  if (OPENWA_API_KEY) headers['x-api-key'] = OPENWA_API_KEY;
-  const to = String(phoneE164).includes('@') ? phoneE164 : `${phoneE164}@c.us`;
+  if (OPENWA_API_KEY) headers['X-API-Key'] = OPENWA_API_KEY;
+  return axios.create({ baseURL: `${OPENWA_URL}/api`, headers, timeout: 15000 });
+}
 
-  const { data } = await axios.post(
-    `${OPENWA_URL}/sendText`,
-    { to, text },
-    { headers, timeout: 10000 }
+function sessionId(explicit) {
+  const id = explicit || OPENWA_SESSION_ID;
+  if (!id) throw new Error('openwa_client: OPENWA_SESSION_ID não configurado');
+  return id;
+}
+
+/**
+ * Telefone → chatId no formato do WhatsApp.
+ * Aceita já-formatado ("5511...@c.us") e devolve como está.
+ */
+function toChatId(phone) {
+  const s = String(phone || '');
+  if (s.includes('@')) return s;
+  const digits = s.replace(/\D/g, '');
+  if (!digits) throw new Error(`openwa_client: telefone inválido "${phone}"`);
+  return `${digits}@c.us`;
+}
+
+/**
+ * Envia texto. Assinatura mantida igual à versão anterior de propósito,
+ * pra webhook_handler.js não precisar mudar.
+ */
+async function sendMessage(phone, text, opts = {}) {
+  if (!text) throw new Error('openwa_client: text obrigatório');
+  const body = {
+    chatId: toChatId(phone),
+    text: String(text).slice(0, MAX_TEXT_LEN),
+  };
+  if (opts.quotedMessageId) body.quotedMessageId = opts.quotedMessageId;
+  const { data } = await api().post(
+    `/sessions/${sessionId(opts.sessionId)}/messages/send-text`,
+    body
   );
   return data;
 }
 
-module.exports = { sendMessage };
+/**
+ * Confere se o número existe no WhatsApp ANTES de tentar enviar.
+ *
+ * Vale a chamada extra: disparar para número inexistente é um dos sinais
+ * mais fortes de conta automatizada, e o número aqui é um VoIP DID em
+ * warm-up. Erro de rede não bloqueia o envio (retorna null = "não sei").
+ */
+async function checkNumber(phone, opts = {}) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (!digits) return null;
+  try {
+    const { data } = await api().get(
+      `/sessions/${sessionId(opts.sessionId)}/contacts/check/${digits}`
+    );
+    if (typeof data === 'boolean') return data;
+    return data?.exists ?? data?.isRegistered ?? data?.valid ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Indicador "digitando...". Falha aqui nunca deve derrubar o envio —
+ * é cosmético, então engole o erro.
+ */
+async function setTyping(phone, isTyping = true, opts = {}) {
+  try {
+    await api().post(`/sessions/${sessionId(opts.sessionId)}/chats/typing`, {
+      chatId: toChatId(phone),
+      typing: Boolean(isTyping),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getSessionStatus(opts = {}) {
+  const { data } = await api().get(`/sessions/${sessionId(opts.sessionId)}/status`);
+  return data;
+}
+
+module.exports = {
+  sendMessage,
+  checkNumber,
+  setTyping,
+  getSessionStatus,
+  toChatId,
+  MAX_TEXT_LEN,
+  __setHttpClientForTests,
+};

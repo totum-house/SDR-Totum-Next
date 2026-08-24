@@ -37,9 +37,8 @@
         ▼                                             ▼
 ┌─────────────────────────┐          ┌──────────────────────────┐
 │  OPENWA (Docker)        │          │  MANUS (já rodando)      │
-│  bind 127.0.0.1:3000    │          │  bind 127.0.0.1:8000     │
-│  Traefik expõe:         │          │  manus.grupototum.com    │
-│  zap.grupototum.com     │          │                          │
+│  bind 127.0.0.1:2785    │          │  bind 127.0.0.1:8000     │
+│  Não exposto (SSH)      │          │  manus.grupototum.com    │
 │  Número: VoIP 3131577292│          │  Executor auxiliar       │
 └─────────────────────────┘          └──────────────────────────┘
         │
@@ -103,10 +102,14 @@
 > o `flow_runner.js` a partir do graph do flow.
 
 ### OpenWA (`apps/openwa`)
-- Versão: v0.23.1 (Docker image `openwa/wa-automate`)
-- Bind: `127.0.0.1:3000`
-- Traefik: `zap.grupototum.com` (acesso restrito por IP allowlist + token)
-- Sessão persistida em volume Docker `openwa-session`
+- Projeto: [rmyndharis/OpenWA](https://github.com/rmyndharis/OpenWA), clonado
+  direto no VPS (`/opt/OpenWA`) — não há compose deste monorepo controlando-o
+- Bind: `127.0.0.1:2785` (confirmado — não exposto)
+- API REST documentada via Swagger (`/api/docs`), auth `X-API-Key`,
+  tudo escopado por `sessionId`. Contrato completo em `apps/openwa/README.md`
+- Acesso hoje: túnel SSH. Traefik/`zap.grupototum.com` só quando houver
+  necessidade real de acesso externo, e sempre com Basic Auth/IP allowlist
+- Persistência da sessão: a confirmar (depende do compose deles)
 - Número: VoIP DID 3131577292 (ver [[whatsapp-sdr-voip-3131577292]])
 
 ### Manus
@@ -141,7 +144,7 @@ console SSE em tempo real, notificação Telegram.
 |--------------|------------------|-----------------------------|
 | Frontend     | Vercel           | `sdr.grupototum.com`        |
 | Motor SDR    | `127.0.0.1:3100` | Nenhuma (só Traefik interno)|
-| OpenWA       | `127.0.0.1:3000` | `zap.grupototum.com` restrito |
+| OpenWA       | `127.0.0.1:2785` | Nenhuma hoje (túnel SSH) |
 | Manus        | `127.0.0.1:8000` | `manus.grupototum.com`      |
 | Supabase     | Docker network   | `supa.grupototum.com`       |
 

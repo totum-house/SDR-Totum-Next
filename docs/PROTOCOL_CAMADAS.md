@@ -30,8 +30,8 @@ Cada arquivo pertence a **1 camada única**. Antes de editar, identifique a cama
 - `apps/motor/src/llm_provider.js`
 
 ### L6 · Integração externa CRITICAL (🟠 laranja — pede aprovação)
-- `apps/openwa/docker-compose.yml`
-- `apps/openwa/config/*`
+- Configuração da instância OpenWA (roda em /opt/OpenWA no VPS, repo próprio deles)
+- `apps/openwa/README.md` (contrato da API, documentação de operação)
 - Qualquer mudança que altere comportamento de envio WhatsApp
 
 ### L7 · Schema banco (🟠 laranja — pede aprovação)
