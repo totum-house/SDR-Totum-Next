@@ -15,7 +15,8 @@ Migrations versionadas para o Supabase self-hosted (`supa.grupototum.com`).
 | # | Arquivo                              | Status  | Descrição                           |
 |---|--------------------------------------|---------|-------------------------------------|
 | 001 | `001_bootstrap_totum_sdr.sql`      | pending | Schema + 8 tabelas + RLS (enable + policies owner-only) |
-| 002 | `002_totum_sdr_workspace_members.sql` | TBD  | Tabela de membros + policies revisadas (multi-usuário por workspace) |
+| 002 | `002_campaigns_rules.sql`          | pending | `campaigns`, `campaign_leads`, `rules` + `conversations.campaign_id` |
+| 003 | `003_totum_sdr_workspace_members.sql` | TBD  | Tabela de membros + policies revisadas (multi-usuário por workspace) |
 | 00X | `00X_totum_sdr_memories.sql`       | BACKLOG | Memória semântica pgvector — ver "Gap conhecido" abaixo |
 
 ### Gap conhecido: totum_sdr não tem memória semântica
@@ -44,6 +45,28 @@ migration própria depois do primeiro ciclo real.
 
 `pgvector` já está disponível neste Postgres, então adicionar depois é
 uma migration, não uma reinstalação.
+
+### O que a 002 acrescenta
+
+- `campaigns` — flow + estado (`draft`/`running`/`paused`/`done`) + cota
+  própria opcional. Índice parcial `uq_campaigns_one_running` garante **uma
+  campanha rodando por workspace**: o workspace tem um número de WhatsApp
+  só, e duas campanhas disputando a mesma cota diária tornariam o consumo
+  do chip impossível de atribuir.
+- `campaign_leads` — a fila de disparo, com `status`, `attempts` e
+  `last_error`. O lead só sai da fila quando a mensagem sai de verdade;
+  bloqueio de cota ou erro de gateway devolve para `queued`.
+- `rules` — configuração por workspace em chave/valor, que a UI `/config`
+  escreve. **Não consegue elevar o teto de envio** — ver
+  `apps/motor/src/rules.js`, que combina YAML, banco, env e hard cap
+  sempre pelo menor valor.
+- `conversations.campaign_id` — coluna nova, nullable. Conversa iniciada
+  pelo lead continua sem campanha.
+
+Divergências conscientes da spec: `workspace_id` em vez de `org_id` (a 001
+já estabeleceu `workspaces` como raiz do tenant) e o graph do flow segue
+em `flows.graph` (JSONB) em vez de `flow_nodes`/`flow_edges` — o
+`flow_runner` e o builder leem e escrevem o graph inteiro.
 
 ### Modelo de RLS da 001 (owner-only)
 

@@ -1,0 +1,75 @@
+# =============================================================
+# SDR-Next — regras globais de operação (Fase 1)
+# =============================================================
+#
+# Fonte da verdade HOJE. A UI /config lê este arquivo e grava overrides
+# em totum_sdr.rules; o motor faz merge (YAML = default, banco = override).
+# Fase 2 inverte: o banco vira primário e o YAML fica só de fallback.
+#
+# Ordem de precedência que o motor aplica (apps/motor/src/rules.js):
+#   1. hard cap do código        — teto absoluto, ninguém passa
+#   2. env do deploy             — WARMUP_ENABLED / WARMUP_DAILY_LIMIT
+#   3. este arquivo              — default versionado
+#   4. totum_sdr.rules (banco)   — override da UI
+#
+# Para QUOTA, os quatro se combinam pelo MENOR valor: nem o banco nem
+# este arquivo conseguem AUMENTAR o teto de envio. Isso é de propósito —
+# em 2026-08-24 saíram 10 mensagens com o limite configurado em 2, e a
+# lição foi que trava de volume não pode morar só em config editável.
+#
+# Para KILL SWITCH vale o inverso: qualquer camada consegue LIGAR o
+# bloqueio, nenhuma consegue desligar o de outra. Parar é sempre fácil.
+# =============================================================
+
+# --- Trava de envio -------------------------------------------
+# true = motor para TUDO (nenhum outbound sai, campanha nenhuma avança).
+# Efeito em menos de 30s: o motor relê as rules a cada 10s e interrompe
+# até as esperas longas entre mensagens (ver rules.js / campaign_runner.js).
+kill_switch: false
+
+# Teto de mensagens outbound por dia, por workspace.
+#
+# ⚠️ NÃO SUBA ESTE NÚMERO SEM LER O SCHEDULE ABAIXO.
+# O número é um VoIP DID com sobrevivência estimada em 65-75%. Estourar
+# volume nos primeiros dias é a forma mais rápida de perder o chip.
+quota_daily: 2
+
+# --- Janela de atendimento ------------------------------------
+# Fora dela o motor não inicia conversa (cold outbound). Responder quem
+# escreveu primeiro continua valendo — é o contrário que é sinal de bot:
+# ninguém prospecta às 3h da manhã.
+window_start: "08:00"
+window_end: "18:00"
+timezone: "America/Sao_Paulo"
+# Dias da semana permitidos (1 = segunda ... 7 = domingo, ISO-8601).
+window_weekdays: [1, 2, 3, 4, 5]
+
+# --- Ritmo humano ---------------------------------------------
+# Espera aleatória entre um disparo e o próximo, em segundos. Cadência
+# regular (1 msg a cada 60s exatos) é assinatura de robô — o intervalo
+# variável é o que faz o padrão parecer gente digitando.
+jitter_min_s: 30
+jitter_max_s: 120
+
+# --- Tom padrão do SDR ----------------------------------------
+# Injetado nos nós improvise_with_goal do flow.
+tone: >-
+  Consultivo, direto e humano. Português do Brasil, informal mas
+  profissional. Mensagens curtas de WhatsApp — 1 a 3 linhas. Sem
+  emoji em excesso, sem jargão de vendas, sem "espero que esteja bem".
+
+# --- Referência de warm-up (NÃO é automático) ------------------
+#
+# Isto é DOCUMENTAÇÃO, não configuração: o motor não lê este bloco e não
+# escala nada sozinho. Subir a cota é decisão manual do Rael (camada L11,
+# 🔴 vermelho em docs/PROTOCOL_CAMADAS.md) — trocar `quota_daily` acima,
+# à mão, depois de olhar a saúde do número.
+#
+# A automação foi rejeitada de propósito: uma curva que sobe sozinha
+# continua subindo no dia em que o WhatsApp já começou a desconfiar do
+# número, que é exatamente o dia de parar.
+warmup_schedule_reference:
+  - { days: "1-3",   daily: 2 }
+  - { days: "4-7",   daily: 5 }
+  - { days: "8-14",  daily: 15 }
+  - { days: "15+",   daily: "escalar gradual, decisão manual" }
