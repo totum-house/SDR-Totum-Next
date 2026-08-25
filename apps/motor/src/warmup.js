@@ -101,12 +101,29 @@ async function countOutboundToday(supabase, workspaceId, now = new Date()) {
 /**
  * Quantas mensagens ainda podem sair hoje.
  * → { allowed: boolean, remaining: number, reason?: string }
+ *
+ * `limit` e `killed` são os valores já resolvidos por rules.js (YAML +
+ * banco + env, reduzidos pelo hard cap). Vêm de fora porque quem chama
+ * é que sabe se existe uma campanha com cota própria — mas os defaults
+ * continuam sendo o env, então chamar sem eles se comporta exatamente
+ * como antes desta mudança (é o que o webhook de resposta faz).
+ *
+ * Nenhum dos dois consegue AFROUXAR a trava: `limit` é combinado pelo
+ * menor com o env, e `killed` pelo OU com o kill switch do env.
  */
-async function checkQuota({ supabase, workspaceId, now = new Date() }) {
-  if (isKillSwitchOn()) {
+async function checkQuota({ supabase, workspaceId, now = new Date(), limit: limitOverride, killed = false }) {
+  if (isKillSwitchOn() || killed) {
     return { allowed: false, remaining: 0, reason: 'kill_switch' };
   }
-  const limit = dailyLimit();
+  // null/undefined/'' = "não veio limite", não "limite zero" — Number(null)
+  // é 0, e tratar isso como teto bloquearia todo envio em silêncio.
+  const hasOverride =
+    limitOverride !== null &&
+    limitOverride !== undefined &&
+    limitOverride !== '' &&
+    Number.isFinite(Number(limitOverride)) &&
+    Number(limitOverride) >= 0;
+  const limit = hasOverride ? Math.min(Number(limitOverride), dailyLimit()) : dailyLimit();
   const sent = await countOutboundToday(supabase, workspaceId, now);
   const remaining = Math.max(0, limit - sent);
   return {

@@ -11,6 +11,8 @@ const { createRunner } = require('./flow_runner');
 const { generate: llmGenerate } = require('./llm_provider');
 const manusClient = require('./manus_client');
 const { checkQuota, withWorkspaceLock } = require('./warmup');
+const { getRules, effectiveDailyLimit, isKillSwitchOn } = require('./rules');
+const { emitEvent, EVENT_TYPES } = require('./events');
 
 /**
  * Contrato VERIFICADO em 2026-08-24 contra o gateway real
@@ -63,7 +65,13 @@ async function findOrCreateLead(supabase, workspaceId, phone) {
   return created;
 }
 
-async function findOrCreateConversation(supabase, workspaceId, lead) {
+/**
+ * `campaignId` só é usado na CRIAÇÃO. Uma conversation aberta que já
+ * existe não é reetiquetada: se a pessoa já estava falando com o SDR,
+ * quem começou aquela conversa foi ela, não a campanha — reescrever isso
+ * faria o relatório da campanha reivindicar conversa que não iniciou.
+ */
+async function findOrCreateConversation(supabase, workspaceId, lead, campaignId = null) {
   const { data: existing, error: findErr } = await supabase
     .from('conversations')
     .select('*')
@@ -76,9 +84,12 @@ async function findOrCreateConversation(supabase, workspaceId, lead) {
   if (findErr) throw findErr;
   if (existing) return existing;
 
+  const row = { workspace_id: workspaceId, lead_id: lead.id };
+  if (campaignId) row.campaign_id = campaignId;
+
   const { data: created, error: insertErr } = await supabase
     .from('conversations')
-    .insert({ workspace_id: workspaceId, lead_id: lead.id })
+    .insert(row)
     .select()
     .single();
   if (insertErr) throw insertErr;
@@ -105,7 +116,18 @@ async function findActiveFlow(supabase, workspaceId) {
  * Compartilhado entre o webhook (inbound do lead) e o dispatch manual
  * (sem inbound) — a única diferença entre os dois é o inboundText.
  */
-async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, phone, inboundText, logger = console }) {
+async function runFlowStep({
+  supabase,
+  openwa,
+  flow,
+  conversation,
+  workspaceId,
+  phone,
+  inboundText,
+  campaign = null,
+  rules = null,
+  logger = console,
+}) {
   const runner = createRunner({ llmGenerate, manusClient, logger });
   const result = await runner.step({ flow, conversation, inboundText });
 
@@ -138,12 +160,21 @@ async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, 
   // insert, todas vendo "ainda tem vaga" (incidente real, 2026-08-24: 10
   // mensagens saíram com WARMUP_DAILY_LIMIT=2). O lock serializa esse
   // ciclo inteiro dentro do processo — ver warmup.js.
+  //
+  // O teto e o kill switch vêm de rules.js (YAML + banco + env, já
+  // reduzidos pelo hard cap). Carregar aqui quando não veio pronto faz
+  // com que o kill switch pare TAMBÉM as respostas a quem escreveu —
+  // "para tudo" tem que significar tudo, não só campanha.
+  const effectiveRules = rules || (await getRules({ supabase, workspaceId, logger }));
+  const quotaLimit = effectiveDailyLimit({ rules: effectiveRules, campaign });
+  const killed = isKillSwitchOn(effectiveRules);
+
   let sent = 0;
   let blocked = null;
   let sendError = null;
   for (const msg of result.outboundMessages) {
     const outcome = await withWorkspaceLock(workspaceId, async () => {
-      const quota = await checkQuota({ supabase, workspaceId });
+      const quota = await checkQuota({ supabase, workspaceId, limit: quotaLimit, killed });
       if (!quota.allowed) return { blocked: quota.reason };
 
       // sendMessage ANTES do insert: só grava em messages o que realmente
@@ -171,6 +202,16 @@ async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, 
       logger.warn(
         `[warmup] envio bloqueado (${outcome.blocked}) — ${result.outboundMessages.length - sent} mensagem(ns) não enviada(s)`
       );
+      emitEvent(
+        outcome.blocked === 'kill_switch' ? EVENT_TYPES.KILL_SWITCH : EVENT_TYPES.QUOTA_BLOCKED,
+        {
+          reason: outcome.blocked,
+          phone,
+          conversation_id: conversation.id,
+          campaign_id: campaign?.id || null,
+          limit: quotaLimit,
+        }
+      );
       break;
     }
     if (outcome.sendError) {
@@ -178,9 +219,22 @@ async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, 
       logger.error(
         `[webhook] falha ao enviar via OpenWA (mensagem NÃO persistida): ${outcome.sendError}`
       );
+      emitEvent(EVENT_TYPES.SEND_ERROR, {
+        error: outcome.sendError,
+        phone,
+        conversation_id: conversation.id,
+        campaign_id: campaign?.id || null,
+      });
       break;
     }
     sent += 1;
+    emitEvent(EVENT_TYPES.OUTBOUND_SENT, {
+      phone,
+      content: msg.text,
+      conversation_id: conversation.id,
+      campaign_id: campaign?.id || null,
+      step_id: conversation.current_step_id || null,
+    });
   }
 
   return {
@@ -207,6 +261,14 @@ async function handleInboundEvent({ body, workspaceId, supabase, openwa, logger 
     direction: 'inbound',
     content: parsed.text,
     openwa_message_id: parsed.openwa_message_id,
+  });
+
+  emitEvent(EVENT_TYPES.INBOUND_RECEIVED, {
+    phone: parsed.phone_e164,
+    content: parsed.text,
+    conversation_id: conversation.id,
+    campaign_id: conversation.campaign_id || null,
+    lead_id: lead.id,
   });
 
   const flow = await findActiveFlow(supabase, workspaceId);
@@ -262,4 +324,15 @@ async function dispatchToLead({ leadId, workspaceId, supabase, openwa, logger = 
   });
 }
 
-module.exports = { handleInboundEvent, dispatchToLead, parseInboundEvent };
+module.exports = {
+  handleInboundEvent,
+  dispatchToLead,
+  parseInboundEvent,
+  // Exportados para o campaign_runner: ele precisa do MESMO caminho de
+  // execução do webhook (cota, lock, persistência, eventos), só que
+  // partindo do flow da campanha em vez do flow ativo do workspace.
+  runFlowStep,
+  findOrCreateConversation,
+  findOrCreateLead,
+  findActiveFlow,
+};

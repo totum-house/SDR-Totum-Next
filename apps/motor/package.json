@@ -2,7 +2,7 @@
   "name": "@sdr-next/motor",
   "version": "0.1.0",
   "private": true,
-  "description": "Motor SDR — webhook + flow_runner + llm_provider + manus_client (Node CJS, PM2)",
+  "description": "Motor SDR \u2014 webhook + flow_runner + llm_provider + manus_client (Node CJS, PM2)",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -18,7 +18,8 @@
     "@supabase/supabase-js": "^2.108.2",
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "js-yaml": "^4.1.0"
   },
   "devDependencies": {
     "vitest": "^2.1.9"

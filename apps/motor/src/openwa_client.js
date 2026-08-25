@@ -44,6 +44,21 @@ function api() {
   return axios.create({ baseURL: `${OPENWA_URL}/api`, headers, timeout: 15000 });
 }
 
+/**
+ * Modo mock (MOTOR_MOCK_SEND=true): o motor roda inteiro — flow, cota,
+ * jitter, persistência, eventos do /live — mas nada sai no WhatsApp.
+ *
+ * Existe porque o gateway e o motor são entregáveis independentes: dá
+ * para testar campanha, warm-up e painel antes de o número estar pronto,
+ * e para ensaiar um flow novo sem gastar cota do chip em warm-up.
+ *
+ * A cota CONTINUA sendo contada no modo mock, de propósito: o ensaio só
+ * vale se o comportamento observado for o mesmo do envio real.
+ */
+function isMockSend() {
+  return String(process.env.MOTOR_MOCK_SEND || 'false').toLowerCase() === 'true';
+}
+
 function sessionId(explicit) {
   const id = explicit || OPENWA_SESSION_ID;
   if (!id) throw new Error('openwa_client: OPENWA_SESSION_ID não configurado');
@@ -73,6 +88,12 @@ async function sendMessage(phone, text, opts = {}) {
     text: String(text).slice(0, MAX_TEXT_LEN),
   };
   if (opts.quotedMessageId) body.quotedMessageId = opts.quotedMessageId;
+
+  if (isMockSend()) {
+    console.log(`[openwa:mock] NÃO enviado → ${body.chatId}: ${body.text.slice(0, 120)}`);
+    return { mocked: true, chatId: body.chatId };
+  }
+
   const { data } = await api().post(
     `/sessions/${sessionId(opts.sessionId)}/messages/send-text`,
     body
@@ -124,6 +145,7 @@ async function getSessionStatus(opts = {}) {
 
 module.exports = {
   sendMessage,
+  isMockSend,
   checkNumber,
   setTyping,
   getSessionStatus,
