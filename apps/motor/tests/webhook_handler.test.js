@@ -398,3 +398,127 @@ describe('falha no envio via OpenWA', () => {
     );
   });
 });
+
+describe('race condition na cota de warm-up (incidente 2026-08-24)', () => {
+  /**
+   * Mock com ESTADO real: messages.count reflete quantos outbound já
+   * foram inseridos de fato, dinamicamente — ao contrário de makeSupabase
+   * (respostas estáticas), que não serve pra provar isto. É o único jeito
+   * de reproduzir o incidente: 13 webhooks quase simultâneos, cota=2,
+   * SEM lock cada um lia o count ANTES de qualquer insert e todos viam
+   * "tem vaga".
+   */
+  function makeStatefulSupabase({ leadsByPhone, flow }) {
+    let outboundCount = 0;
+    const conversations = new Map(); // phone -> conversation
+
+    function chainFor(table) {
+      let op = null;
+      let payload = null;
+      let filters = {};
+      const chain = {
+        select(_cols, opts) {
+          if (op !== 'insert' && op !== 'update') op = opts?.count ? 'count' : 'select';
+          return chain;
+        },
+        insert(p) { op = 'insert'; payload = p; return chain; },
+        update(p) { op = 'update'; payload = p; return chain; },
+        eq(col, val) { filters[col] = val; return chain; },
+        in() { return chain; },
+        gte() { return chain; },
+        order() { return chain; },
+        limit() { return chain; },
+        maybeSingle: async () => resolve(),
+        single: async () => resolve(),
+        then(resolve_, reject) { return Promise.resolve(resolve()).then(resolve_, reject); },
+      };
+      function resolve() {
+        if (table === 'leads' && op === 'select') {
+          const phone = filters.phone_e164;
+          const id = filters.id;
+          const lead = phone ? leadsByPhone[phone] : Object.values(leadsByPhone).find((l) => l.id === id);
+          return { data: lead || null, error: null };
+        }
+        if (table === 'conversations' && op === 'select') {
+          if (filters.id) {
+            for (const c of conversations.values()) if (c.id === filters.id) return { data: c, error: null };
+            return { data: null, error: null };
+          }
+          if (filters.lead_id) {
+            const found = [...conversations.values()].find((c) => c.lead_id === filters.lead_id);
+            return { data: found || null, error: null };
+          }
+          // sem lead_id: é a query de countOutboundToday (lista todas as
+          // conversations do workspace) — formato diferente da busca
+          // de conversation única (findOrCreateConversation).
+          return { data: [...conversations.values()].map((c) => ({ id: c.id })), error: null };
+        }
+        if (table === 'conversations' && op === 'insert') {
+          const conv = { id: `conv-${payload.lead_id}`, lead_id: payload.lead_id, context: {}, status: 'open', current_step_id: null };
+          conversations.set(conv.id, conv);
+          return { data: conv, error: null };
+        }
+        if (table === 'conversations' && op === 'update') {
+          return { data: null, error: null };
+        }
+        if (table === 'flows' && op === 'select') {
+          return { data: flow, error: null };
+        }
+        if (table === 'messages' && op === 'insert') {
+          if (payload.direction === 'outbound') outboundCount += 1;
+          return { data: null, error: null };
+        }
+        if (table === 'messages' && op === 'count') {
+          return { count: outboundCount, error: null };
+        }
+        return { data: null, error: null };
+      }
+      return chain;
+    }
+    return { from: (t) => chainFor(t), getOutboundCount: () => outboundCount };
+  }
+
+  it('sob 8 dispatches concorrentes, no máximo WARMUP_DAILY_LIMIT saem — não passa disso', async () => {
+    const prevLimit = process.env.WARMUP_DAILY_LIMIT;
+    const prevEnabled = process.env.WARMUP_ENABLED;
+    process.env.WARMUP_DAILY_LIMIT = '2';
+    process.env.WARMUP_ENABLED = 'true';
+
+    const flow = {
+      id: 'flow-1',
+      graph: {
+        entry_step_id: 'msg1',
+        nodes: [{ id: 'msg1', type: 'message', text: 'Oi!' }],
+        edges: [],
+      },
+    };
+    const leadsByPhone = {};
+    for (let i = 0; i < 8; i++) {
+      leadsByPhone[`lead-${i}`] = { id: `lead-${i}`, phone_e164: `551199999000${i}` };
+    }
+    const supabase = makeStatefulSupabase({ leadsByPhone, flow });
+    const openwa = { sendMessage: vi.fn().mockResolvedValue({ ok: true }) };
+
+    // 8 chamadas disparadas ao mesmo tempo (Promise.all), simulando a
+    // rajada de webhooks quase simultâneos do incidente real.
+    await Promise.all(
+      Object.keys(leadsByPhone).map((leadId) =>
+        dispatchToLead({
+          leadId,
+          workspaceId: 'ws-1',
+          supabase,
+          openwa,
+          logger: { warn: vi.fn(), error: vi.fn() },
+        })
+      )
+    );
+
+    process.env.WARMUP_DAILY_LIMIT = prevLimit;
+    process.env.WARMUP_ENABLED = prevEnabled;
+
+    // A prova real: nunca mais que 2 sends de fato aconteceram, mesmo
+    // com 8 tentativas concorrentes disputando a mesma cota.
+    expect(openwa.sendMessage.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(supabase.getOutboundCount()).toBeLessThanOrEqual(2);
+  });
+});

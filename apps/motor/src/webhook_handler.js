@@ -10,7 +10,7 @@
 const { createRunner } = require('./flow_runner');
 const { generate: llmGenerate } = require('./llm_provider');
 const manusClient = require('./manus_client');
-const { checkQuota } = require('./warmup');
+const { checkQuota, withWorkspaceLock } = require('./warmup');
 
 /**
  * Contrato VERIFICADO em 2026-08-24 contra o gateway real
@@ -131,40 +131,55 @@ async function runFlowStep({ supabase, openwa, flow, conversation, workspaceId, 
     .eq('id', conversation.id);
   if (updateErr) throw updateErr;
 
-  // Trava de warm-up: checa a cota ANTES de cada envio. Uma resposta do
-  // flow pode ter mais de uma mensagem, e a cota é por mensagem.
+  // Trava de warm-up: checa a cota, envia e persiste como UMA unidade,
+  // serializada por workspace via withWorkspaceLock. checkQuota() sozinho
+  // é check-then-act — sob chamadas concorrentes (ex: rajada de webhooks),
+  // várias passariam pelo SELECT antes de qualquer uma persistir seu
+  // insert, todas vendo "ainda tem vaga" (incidente real, 2026-08-24: 10
+  // mensagens saíram com WARMUP_DAILY_LIMIT=2). O lock serializa esse
+  // ciclo inteiro dentro do processo — ver warmup.js.
   let sent = 0;
   let blocked = null;
   let sendError = null;
   for (const msg of result.outboundMessages) {
-    const quota = await checkQuota({ supabase, workspaceId });
-    if (!quota.allowed) {
-      blocked = quota.reason;
-      logger.warn(
-        `[warmup] envio bloqueado (${quota.reason}) — ${result.outboundMessages.length - sent} mensagem(ns) não enviada(s)`
-      );
-      break;
-    }
-    // sendMessage ANTES do insert: só grava em messages o que realmente
-    // saiu. Erro aqui NÃO propaga — devolver 500 pro OpenWA dispararia o
-    // retry automático dele (retryCount:3), reprocessando o MESMO evento
-    // inbound como se fosse novo. Num flow com `question` pendente, isso
-    // gravaria o texto do lead como resposta à pergunta errada.
-    try {
-      await openwa.sendMessage(phone, msg.text);
-    } catch (err) {
-      sendError = err.message;
-      logger.error(
-        `[webhook] falha ao enviar via OpenWA (mensagem NÃO persistida): ${err.message}`
-      );
-      break;
-    }
-    await supabase.from('messages').insert({
-      conversation_id: conversation.id,
-      direction: 'outbound',
-      content: msg.text,
-      message_type: msg.type || 'text',
+    const outcome = await withWorkspaceLock(workspaceId, async () => {
+      const quota = await checkQuota({ supabase, workspaceId });
+      if (!quota.allowed) return { blocked: quota.reason };
+
+      // sendMessage ANTES do insert: só grava em messages o que realmente
+      // saiu. Erro aqui NÃO propaga — devolver 500 pro OpenWA dispararia
+      // o retry automático dele (retryCount:3), reprocessando o MESMO
+      // evento inbound como se fosse novo. Num flow com `question`
+      // pendente, isso gravaria o texto do lead como resposta errada.
+      try {
+        await openwa.sendMessage(phone, msg.text);
+      } catch (err) {
+        return { sendError: err.message };
+      }
+
+      await supabase.from('messages').insert({
+        conversation_id: conversation.id,
+        direction: 'outbound',
+        content: msg.text,
+        message_type: msg.type || 'text',
+      });
+      return { sent: true };
     });
+
+    if (outcome.blocked) {
+      blocked = outcome.blocked;
+      logger.warn(
+        `[warmup] envio bloqueado (${outcome.blocked}) — ${result.outboundMessages.length - sent} mensagem(ns) não enviada(s)`
+      );
+      break;
+    }
+    if (outcome.sendError) {
+      sendError = outcome.sendError;
+      logger.error(
+        `[webhook] falha ao enviar via OpenWA (mensagem NÃO persistida): ${outcome.sendError}`
+      );
+      break;
+    }
     sent += 1;
   }
 

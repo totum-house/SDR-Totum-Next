@@ -24,9 +24,34 @@
  * escreveu primeiro. Bloquear uma resposta é ruim de atendimento mas
  * seguro de ban — e durante o warm-up é exatamente o comportamento
  * desejado. Se quiser separar cold outbound de resposta, é aqui.
+ *
+ * INCIDENTE 2026-08-24: checkQuota() sozinho é check-then-act, não
+ * atômico. Sob rajada (WhatsApp sincronizou histórico antigo de um
+ * número reciclado e disparou ~13 webhooks quase simultâneos),
+ * requisições concorrentes fizeram o SELECT count(*) da cota TODAS
+ * antes de qualquer uma delas persistir seu próprio insert — cada uma
+ * viu "ainda tem vaga" e passou. Resultado: 10 mensagens saíram com
+ * WARMUP_DAILY_LIMIT=2. Corrigido com withWorkspaceLock() abaixo:
+ * serializa check+send+insert por workspace, dentro deste processo.
  */
 
 const DEFAULT_DAILY_LIMIT = 2;
+
+// Serializa o ciclo check-quota→send→persist por workspace, DENTRO deste
+// processo. Suficiente porque o motor roda como 1 instância PM2
+// (ecosystem.config.cjs: instances: 1, exec_mode: fork) — não há
+// concorrência entre processos a proteger. Se um dia isso escalar pra
+// múltiplas instâncias/servidores, este lock deixa de proteger sozinho
+// e a cota precisa virar uma operação atômica no Postgres (ex: advisory
+// lock ou UPDATE ... RETURNING numa linha de contador).
+const workspaceLocks = new Map();
+
+function withWorkspaceLock(workspaceId, fn) {
+  const tail = workspaceLocks.get(workspaceId) || Promise.resolve();
+  const result = tail.catch(() => {}).then(fn);
+  workspaceLocks.set(workspaceId, result.then(() => {}, () => {}));
+  return result;
+}
 
 function startOfTodayISO(now = new Date()) {
   const d = new Date(now);
@@ -91,4 +116,10 @@ async function checkQuota({ supabase, workspaceId, now = new Date() }) {
   };
 }
 
-module.exports = { checkQuota, countOutboundToday, dailyLimit, isKillSwitchOn };
+module.exports = {
+  checkQuota,
+  countOutboundToday,
+  dailyLimit,
+  isKillSwitchOn,
+  withWorkspaceLock,
+};
