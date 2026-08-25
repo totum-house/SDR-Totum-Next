@@ -6,7 +6,9 @@ export function PageHeader({
   actions,
 }: {
   title: string;
-  subtitle?: string;
+  // ReactNode e não string: várias telas põem link ou <strong> no
+  // subtítulo (ex: "flow X · status RUNNING").
+  subtitle?: ReactNode;
   actions?: ReactNode;
 }) {
   return (

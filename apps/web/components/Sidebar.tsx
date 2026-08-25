@@ -8,14 +8,22 @@ import {
   Users,
   Settings,
   Activity,
+  LayoutDashboard,
+  Megaphone,
+  Radio,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
 
 const NAV = [
-  { href: '/console',  label: 'Console',   icon: MessageSquare },
-  { href: '/flows',    label: 'Flows',     icon: GitBranch },
-  { href: '/leads',    label: 'Leads',     icon: Users },
-  { href: '/settings', label: 'Settings',  icon: Settings },
+  { href: '/',          label: 'Operação',   icon: LayoutDashboard },
+  { href: '/leads',     label: 'Leads',      icon: Users },
+  { href: '/campanhas', label: 'Campanhas',  icon: Megaphone },
+  { href: '/builder',   label: 'Builder',    icon: GitBranch },
+  { href: '/live',      label: 'Ao vivo',    icon: Radio },
+  { href: '/console',   label: 'Conversas',  icon: MessageSquare },
+  { href: '/config',    label: 'Regras',     icon: SlidersHorizontal },
+  { href: '/settings',  label: 'Settings',   icon: Settings },
 ];
 
 export function Sidebar() {
@@ -37,7 +45,9 @@ export function Sidebar() {
 
       <nav className="flex-1 p-2 space-y-1">
         {NAV.map(({ href, label, icon: Icon }) => {
-          const active = pathname === href || pathname.startsWith(href + '/');
+          // '/' precisa de match exato, senão o dashboard fica marcado
+          // como ativo em toda página do painel.
+          const active = href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(`${href}/`);
           return (
             <Link
               key={href}
@@ -58,7 +68,7 @@ export function Sidebar() {
 
       <div className="p-3 border-t border-zinc-800 text-[10px] text-zinc-500">
         <div>Motor: <span className="text-zinc-300 font-mono">127.0.0.1:3100</span></div>
-        <div>OpenWA: <span className="text-zinc-300 font-mono">127.0.0.1:3000</span></div>
+        <div>OpenWA: <span className="text-zinc-300 font-mono">127.0.0.1:2785</span></div>
       </div>
     </aside>
   );
