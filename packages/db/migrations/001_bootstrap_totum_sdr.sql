@@ -6,25 +6,42 @@
 -- =============================================================
 --
 -- IMPORTANTE — antes de aplicar em produção:
---   1) Backup schema-only obrigatório:
---        pg_dump -h supa.grupototum.com -U postgres -d postgres --schema-only \
---          -f /tmp/supa-backup-$(date +%Y%m%d-%H%M%S).sql
---        sha256sum /tmp/supa-backup-*.sql > /tmp/supa-backup.sha256
---   2) Verificar que schema `totum_sdr` NÃO existe ainda:
---        \dn totum_sdr
---   3) Aguardar autorização literal "aprovado, aplica em prod" do Rael.
---   4) Aplicar em bloco único:
---        psql -h supa.grupototum.com -U postgres -d postgres \
---          -f packages/db/migrations/001_bootstrap_totum_sdr.sql
---   5) Validar:
---        \dt totum_sdr.*   -- deve listar 7 tabelas
 --
--- RLS: policies NÃO estão nessa migration. Serão adicionadas em
--- 002_totum_sdr_rls_policies.sql após Auth conectada e definição
--- explícita de tenants aprovada pelo Rael. Aqui só habilitamos RLS.
+--   O Postgres NÃO aceita conexão de fora: supa.grupototum.com aponta pro
+--   VPS mas a 5432 está fechada. Tudo roda por SSH dentro do container
+--   Docker. Procedimento completo em packages/db/README.md.
+--
+--   1) Backup schema-only obrigatório (sem -t: -t corrompe o dump com \r):
+--        ssh claude_sftp@panel.grupototum.com \
+--          "docker exec <CONTAINER> pg_dump -U postgres -d postgres --schema-only" \
+--          > /tmp/supa-backup-$(date +%Y%m%d-%H%M%S).sql
+--   2) CONFERIR que o backup não saiu vazio antes de seguir.
+--   3) Verificar que o schema `totum_sdr` NÃO existe ainda (\dn totum_sdr).
+--   4) Aguardar autorização literal "aprovado, aplica em prod" do Rael.
+--   5) Aplicar empurrando por stdin:
+--        ssh claude_sftp@panel.grupototum.com \
+--          "docker exec -i <CONTAINER> psql -U postgres -d postgres" \
+--          < packages/db/migrations/001_bootstrap_totum_sdr.sql
+--   6) Validar: \dt totum_sdr.*   -- deve listar 8 tabelas
+--
+-- RLS: habilitada NESTA migration, junto com as policies (enable sem
+-- policy trancaria as tabelas para anon/authenticated). Modelo mínimo:
+-- tenant = workspace, dono = workspaces.owner_email casado com o email
+-- do JWT. service_role tem bypass explícito (o motor usa service_role).
+--
+-- Camada L8 (🔴 vermelho, docs/PROTOCOL_CAMADAS.md) — escrito sob
+-- autorização explícita do Rael (2026-08-23). Modelo de tenant é
+-- OWNER-ONLY: não há tabela de membros, então só o dono do workspace
+-- enxerga os dados. Convidar usuário para workspace exige uma 002 com
+-- workspace_members + policy revisada.
 -- =============================================================
 
 BEGIN;
+
+-- gen_random_uuid() é nativo no PostgreSQL 13+, mas esta migration usa a
+-- função em 8 DEFAULTs — garantir pgcrypto torna o script seguro também
+-- em instâncias < PG13. IF NOT EXISTS é idempotente e no-op no PG13+.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE SCHEMA IF NOT EXISTS totum_sdr;
 
@@ -36,6 +53,7 @@ CREATE TABLE totum_sdr.workspaces (
   name         TEXT NOT NULL,
   owner_email  TEXT NOT NULL,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   settings     JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
@@ -70,7 +88,11 @@ CREATE TABLE totum_sdr.conversations (
   current_step_id   TEXT,
   context           JSONB NOT NULL DEFAULT '{}'::jsonb,
   started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- last_activity_at = timestamp semântico (última mensagem trocada), setado
+  -- explicitamente pelo motor. updated_at = timestamp técnico de qualquer
+  -- UPDATE na linha, mantido pelo trigger. São propósitos diferentes.
   last_activity_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (status IN ('open', 'waiting_human', 'closed'))
 );
 CREATE INDEX idx_conversations_workspace ON totum_sdr.conversations (workspace_id, status, last_activity_at DESC);
@@ -164,17 +186,6 @@ CREATE TABLE totum_sdr.automation_runs (
 CREATE INDEX idx_automation_runs_automation ON totum_sdr.automation_runs (automation_id, created_at DESC);
 
 -- --------------------------------------------------------------
--- RLS: habilitar (sem policies ainda — vem na 002)
--- --------------------------------------------------------------
-ALTER TABLE totum_sdr.leads            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.conversations    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.messages         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.flows            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.flow_runs        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.automations      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE totum_sdr.automation_runs  ENABLE ROW LEVEL SECURITY;
-
--- --------------------------------------------------------------
 -- Trigger genérico updated_at
 -- --------------------------------------------------------------
 CREATE OR REPLACE FUNCTION totum_sdr.set_updated_at()
@@ -193,17 +204,173 @@ CREATE TRIGGER trg_flows_updated_at
   BEFORE UPDATE ON totum_sdr.flows
   FOR EACH ROW EXECUTE FUNCTION totum_sdr.set_updated_at();
 
+CREATE TRIGGER trg_workspaces_updated_at
+  BEFORE UPDATE ON totum_sdr.workspaces
+  FOR EACH ROW EXECUTE FUNCTION totum_sdr.set_updated_at();
+
+CREATE TRIGGER trg_conversations_updated_at
+  BEFORE UPDATE ON totum_sdr.conversations
+  FOR EACH ROW EXECUTE FUNCTION totum_sdr.set_updated_at();
+
+-- --------------------------------------------------------------
+-- RLS — habilitação + policies mínimas por workspace
+-- --------------------------------------------------------------
+
+-- Email do usuário autenticado, lido do claim JWT que o PostgREST injeta.
+-- Usa current_setting em vez de auth.jwt() de propósito: não cria
+-- dependência do schema `auth` existir no momento do apply.
+CREATE OR REPLACE FUNCTION totum_sdr.current_user_email()
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT NULLIF(
+    current_setting('request.jwt.claims', true)::jsonb ->> 'email',
+    ''
+  );
+$$;
+
+-- Workspaces que o usuário atual possui.
+-- SECURITY DEFINER para ler workspaces sem recursão de policy.
+CREATE OR REPLACE FUNCTION totum_sdr.owned_workspace_ids()
+RETURNS SETOF UUID
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT w.id
+    FROM totum_sdr.workspaces w
+   WHERE w.owner_email = totum_sdr.current_user_email();
+$$;
+
+ALTER TABLE totum_sdr.workspaces       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE totum_sdr.leads            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE totum_sdr.conversations    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE totum_sdr.messages         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE totum_sdr.flows            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE totum_sdr.flow_runs        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE totum_sdr.automations      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE totum_sdr.automation_runs  ENABLE ROW LEVEL SECURITY;
+
+-- Tenant root: o dono enxerga o próprio workspace.
+CREATE POLICY workspaces_owner ON totum_sdr.workspaces
+  FOR ALL
+  USING      (owner_email = totum_sdr.current_user_email())
+  WITH CHECK (owner_email = totum_sdr.current_user_email());
+
+-- Tabelas com workspace_id direto.
+CREATE POLICY leads_by_workspace ON totum_sdr.leads
+  FOR ALL
+  USING      (workspace_id IN (SELECT totum_sdr.owned_workspace_ids()))
+  WITH CHECK (workspace_id IN (SELECT totum_sdr.owned_workspace_ids()));
+
+CREATE POLICY conversations_by_workspace ON totum_sdr.conversations
+  FOR ALL
+  USING      (workspace_id IN (SELECT totum_sdr.owned_workspace_ids()))
+  WITH CHECK (workspace_id IN (SELECT totum_sdr.owned_workspace_ids()));
+
+CREATE POLICY flows_by_workspace ON totum_sdr.flows
+  FOR ALL
+  USING      (workspace_id IN (SELECT totum_sdr.owned_workspace_ids()))
+  WITH CHECK (workspace_id IN (SELECT totum_sdr.owned_workspace_ids()));
+
+CREATE POLICY automations_by_workspace ON totum_sdr.automations
+  FOR ALL
+  USING      (workspace_id IN (SELECT totum_sdr.owned_workspace_ids()))
+  WITH CHECK (workspace_id IN (SELECT totum_sdr.owned_workspace_ids()));
+
+-- Tabelas sem workspace_id: alcançadas por join.
+CREATE POLICY messages_by_conversation ON totum_sdr.messages
+  FOR ALL
+  USING (conversation_id IN (
+    SELECT c.id FROM totum_sdr.conversations c
+     WHERE c.workspace_id IN (SELECT totum_sdr.owned_workspace_ids())
+  ))
+  WITH CHECK (conversation_id IN (
+    SELECT c.id FROM totum_sdr.conversations c
+     WHERE c.workspace_id IN (SELECT totum_sdr.owned_workspace_ids())
+  ));
+
+CREATE POLICY flow_runs_by_conversation ON totum_sdr.flow_runs
+  FOR ALL
+  USING (conversation_id IN (
+    SELECT c.id FROM totum_sdr.conversations c
+     WHERE c.workspace_id IN (SELECT totum_sdr.owned_workspace_ids())
+  ))
+  WITH CHECK (conversation_id IN (
+    SELECT c.id FROM totum_sdr.conversations c
+     WHERE c.workspace_id IN (SELECT totum_sdr.owned_workspace_ids())
+  ));
+
+CREATE POLICY automation_runs_by_automation ON totum_sdr.automation_runs
+  FOR ALL
+  USING (automation_id IN (
+    SELECT a.id FROM totum_sdr.automations a
+     WHERE a.workspace_id IN (SELECT totum_sdr.owned_workspace_ids())
+  ))
+  WITH CHECK (automation_id IN (
+    SELECT a.id FROM totum_sdr.automations a
+     WHERE a.workspace_id IN (SELECT totum_sdr.owned_workspace_ids())
+  ));
+
+-- --------------------------------------------------------------
+-- Grants + bypass do service_role
+--
+-- Os roles anon/authenticated/service_role são criados pelo Supabase.
+-- O bloco é guardado por pg_roles para a migration não quebrar num
+-- Postgres puro (ex: banco de teste local sem Supabase em cima).
+--
+-- service_role no Supabase já tem BYPASSRLS, então a policy abaixo é
+-- redundante na prática — está explícita para o bypass ficar legível
+-- na leitura do schema, e para cobrir o caso de a role ser recriada
+-- sem esse atributo.
+-- --------------------------------------------------------------
+DO $$
+DECLARE
+  tbl TEXT;
+  tables TEXT[] := ARRAY[
+    'workspaces', 'leads', 'conversations', 'messages',
+    'flows', 'flow_runs', 'automations', 'automation_runs'
+  ];
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    EXECUTE 'GRANT USAGE ON SCHEMA totum_sdr TO service_role';
+    EXECUTE 'GRANT ALL ON ALL TABLES IN SCHEMA totum_sdr TO service_role';
+    FOREACH tbl IN ARRAY tables LOOP
+      EXECUTE format(
+        'CREATE POLICY %I ON totum_sdr.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',
+        tbl || '_service_role', tbl
+      );
+    END LOOP;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'GRANT USAGE ON SCHEMA totum_sdr TO authenticated';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA totum_sdr TO authenticated';
+  END IF;
+
+  -- anon recebe USAGE no schema mas nenhum privilégio de tabela:
+  -- sem login não há email no JWT, então toda policy avaliaria falso.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'GRANT USAGE ON SCHEMA totum_sdr TO anon';
+  END IF;
+END $$;
+
 COMMIT;
 
 -- =============================================================
 -- Verificação pós-apply (rodar manualmente):
 --   SELECT table_name FROM information_schema.tables
 --     WHERE table_schema = 'totum_sdr' ORDER BY table_name;
---   -- esperado: 7 linhas (automation_runs, automations, conversations,
+--   -- esperado: 8 linhas (automation_runs, automations, conversations,
 --   --                     flow_runs, flows, leads, messages, workspaces)
---   -- (nota: 8 tabelas incluindo workspaces; SPEC original menciona 7 "operacionais")
 --
 --   SELECT tablename, rowsecurity FROM pg_tables
---     WHERE schemaname = 'totum_sdr' AND rowsecurity = true;
---   -- esperado: 7 tabelas com RLS habilitada (workspaces fica sem RLS por ser tenant root)
+--     WHERE schemaname = 'totum_sdr' ORDER BY tablename;
+--   -- esperado: 8 tabelas com rowsecurity = true
+--
+--   SELECT tablename, policyname FROM pg_policies
+--     WHERE schemaname = 'totum_sdr' ORDER BY tablename, policyname;
+--   -- esperado: 1 policy por tabela + 1 _service_role por tabela = 16
 -- =============================================================

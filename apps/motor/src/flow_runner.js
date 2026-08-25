@@ -18,6 +18,68 @@
  * server.js. Isso facilita testar sem Supabase.
  */
 
+// Texto vindo do lead entra no context e é interpolado nos prompts do LLM
+// (stepImprovise monta o prompt com __history + inboundText). Sem limite,
+// uma mensagem gigante estoura o context window; sem escape, o lead pode
+// forjar tags de sistema e tentar prompt injection.
+const MAX_INBOUND_LEN = 2000;
+
+// Teto da resposta gerada pelo LLM antes de virar mensagem de WhatsApp.
+// Mensagem de SDR é curta por design; um LLM que "derrapa" e devolve um
+// muro de texto queima o número no warm-up e denuncia o bot.
+const MAX_REPLY_LEN = 900;
+
+const REPLY_FALLBACK = 'Deixa eu te responder j\u00e1 j\u00e1 \ud83d\ude0a';
+
+/**
+ * Guardrail do output do LLM antes de ir pro lead.
+ *
+ * - descarta cercas de c\u00f3digo e marca\u00e7\u00e3o tipo tag que vazam do modelo
+ * - remove controles e colapsa espa\u00e7o em excesso
+ * - corta em MAX_REPLY_LEN na \u00faltima fronteira de frase/palavra, pra n\u00e3o
+ *   mandar mensagem cortada no meio da palavra
+ * - devolve o fallback se sobrar vazio
+ */
+function sanitizeLlmReply(text) {
+  let s = String(text == null ? '' : text);
+  s = s.replace(/```[\s\S]*?```/g, ' ');
+  s = s.replace(/```/g, ' ');
+  s = s.replace(/<[^>]{0,80}>/g, ' ');
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+  s = s.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+
+  if (s.length > MAX_REPLY_LEN) {
+    const head = s.slice(0, MAX_REPLY_LEN);
+    const lastSentence = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '));
+    const cut = lastSentence > MAX_REPLY_LEN * 0.5 ? lastSentence + 1 : head.lastIndexOf(' ');
+    s = (cut > 0 ? head.slice(0, cut) : head).trim();
+  }
+
+  return s || REPLY_FALLBACK;
+}
+
+/**
+ * Sanitiza texto vindo do lead antes de gravar em context.
+ *
+ * - remove caracteres de controle (menos \n e \t)
+ * - neutraliza `<...>` virando `‹...›` — preserva o que a pessoa escreveu
+ *   de forma legível, mas impede que o texto se passe por tag de sistema
+ * - trunca em MAX_INBOUND_LEN, marcando o corte
+ */
+function sanitizeInbound(text) {
+  if (text == null) return text;
+  let s = String(text);
+  // Remove controles C0/C1 preservando \n e \t.
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+  s = s.replace(/</g, '\u2039').replace(/>/g, '\u203A');
+  if (s.length > MAX_INBOUND_LEN) {
+    s = `${s.slice(0, MAX_INBOUND_LEN)}\u2026[truncado]`;
+  }
+  return s;
+}
+
 function renderTemplate(text, vars = {}) {
   return String(text || '').replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (m, k) => {
     const parts = k.split('.');
@@ -92,9 +154,10 @@ function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
         updates: { awaiting_inbound: true },
       };
     }
-    // Chegou inbound: grava em context[var_name] e avança
+    // Chegou inbound: grava em context[var_name] e avança.
+    // Sanitiza antes de persistir — esse valor volta nos prompts do LLM.
     const updates = {};
-    if (node.save_as) updates[node.save_as] = inboundText;
+    if (node.save_as) updates[node.save_as] = sanitizeInbound(inboundText);
     return {
       outboundMessages: [],
       nextStepId: findEdgeTarget({ graph: ctx.__flow.graph }, node.id),
@@ -132,8 +195,10 @@ function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
       ...(node.success_criteria || []).map((c) => `- ${c}`),
       ``,
       `Histórico da conversa:`,
-      ...(ctx.__history || []).map((h) => `[${h.direction}] ${h.content}`),
-      inboundText ? `\nÚltima mensagem do lead: ${inboundText}` : '',
+      // Conteúdo escrito pelo lead é DADO, nunca instrução — sanitiza antes
+      // de entrar no prompt pra ele não forjar tag de sistema.
+      ...(ctx.__history || []).map((h) => `[${h.direction}] ${sanitizeInbound(h.content)}`),
+      inboundText ? `\nÚltima mensagem do lead: ${sanitizeInbound(inboundText)}` : '',
       ``,
       `Responda um JSON válido: {"reply": "mensagem curta", "goal_reached": true|false}`,
     ].join('\n');
@@ -146,9 +211,9 @@ function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
       const e = clean.lastIndexOf('}');
       parsed = JSON.parse(s >= 0 && e > s ? clean.slice(s, e + 1) : clean);
     } catch {
-      parsed = { reply: 'Deixa eu te responder já já 😊', goal_reached: false };
+      parsed = { reply: REPLY_FALLBACK, goal_reached: false };
     }
-    const reply = String(parsed.reply || '').trim() || '...';
+    const reply = sanitizeLlmReply(parsed.reply);
     const reached = Boolean(parsed.goal_reached);
     if (reached) {
       return {
@@ -221,4 +286,12 @@ function createRunner({ llmGenerate, manusClient, logger = console } = {}) {
   return { step, renderTemplate, evalCondition };
 }
 
-module.exports = { createRunner, renderTemplate, evalCondition, findNode, findEdgeTarget };
+module.exports = {
+  createRunner,
+  renderTemplate,
+  evalCondition,
+  findNode,
+  findEdgeTarget,
+  sanitizeInbound,
+  sanitizeLlmReply,
+};
