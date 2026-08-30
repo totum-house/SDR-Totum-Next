@@ -13,6 +13,7 @@ const manusClient = require('./manus_client');
 const { checkQuota, withWorkspaceLock } = require('./warmup');
 const { getRules, effectiveDailyLimit, isKillSwitchOn } = require('./rules');
 const { emitEvent, EVENT_TYPES } = require('./events');
+const { execFile } = require('node:child_process');
 
 /**
  * Contrato VERIFICADO em 2026-08-24 contra o gateway real
@@ -246,7 +247,46 @@ async function runFlowStep({
   };
 }
 
+
+// Status que exigem atencao humana ou indicam que o WhatsApp da sessao caiu.
+// 'ready' e os estados de boot normal (created/initializing/qr_ready/authenticating)
+// NAO disparam alerta -- so os que tiram a sessao do ar de forma inesperada.
+const ALARMING_SESSION_STATUSES = new Set(['disconnected', 'failed', 'action_required']);
+
+/**
+ * Dispara /root/totum-ops/alert.sh (ntfy + WhatsApp, com cooldown/dedupe
+ * proprios) quando a sessao do OpenWA cai ou entra em estado que precisa de
+ * intervencao. Fire-and-forget: nunca deixa o alerta derrubar o processamento
+ * do webhook -- se o alert.sh falhar, so loga.
+ */
+function fireOpenwaAlert(event, detail, logger = console) {
+  execFile(
+    '/root/totum-ops/alert.sh',
+    [event, detail],
+    { timeout: 15000 },
+    (err) => {
+      if (err) logger.warn(`[webhook] alert.sh falhou para ${event}: ${err.message}`);
+    }
+  );
+}
+
 async function handleInboundEvent({ body, workspaceId, supabase, openwa, logger = console }) {
+  const eventType = body?.event;
+  if (eventType === 'session.disconnected') {
+    const reason = body?.data?.reason || 'motivo desconhecido';
+    logger.warn(`[webhook] sessao OpenWA desconectada: ${reason}`);
+    fireOpenwaAlert('Sessao WhatsApp caiu', `sessionId=${body?.sessionId || 'desconhecido'} motivo=${reason}`, logger);
+    return { ok: true, skipped: 'session_disconnected' };
+  }
+  if (eventType === 'session.status') {
+    const status = body?.data?.status;
+    if (ALARMING_SESSION_STATUSES.has(status)) {
+      logger.warn(`[webhook] sessao OpenWA em status critico: ${status}`);
+      fireOpenwaAlert('Sessao WhatsApp em status critico', `sessionId=${body?.sessionId || 'desconhecido'} status=${status}`, logger);
+    }
+    return { ok: true, skipped: 'session_status', status };
+  }
+
   const parsed = parseInboundEvent(body);
   if (!parsed) {
     logger.warn('[webhook] evento sem remetente reconhecível, ignorado');
